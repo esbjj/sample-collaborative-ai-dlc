@@ -1089,6 +1089,12 @@ module "projects_lambda" {
   # Project vertex LAST, so a client-side timeout on a big project leaves it
   # listed and the delete simply re-runs to completion.
   timeout = 300
+  # Same 128 MB floor problem as the intents function: GET /api/projects — the
+  # request that renders the space list — reports 110 MB of 128 MB used, so it
+  # sits one allocation away from Runtime.OutOfMemory. Sized lower than intents
+  # because its responses are small; the cost here is the dependency baseline,
+  # not the payload.
+  memory_size = 512
 
   source_path = [
     {
@@ -2394,6 +2400,14 @@ module "intents_lambda" {
   handler       = "index.handler"
   runtime       = "nodejs24.x"
   timeout       = 120
+  # The AWS default of 128 MB is below this function's floor: the SDK v3 clients
+  # plus the gremlin driver alone report 106-114 MB used on a trivial request,
+  # leaving no working headroom. Serving one long-running intent's detail DTO
+  # (~1.5 MB of DynamoDB rows marshalled, mapped and stringified into a ~650 KB
+  # response) killed it with Runtime.OutOfMemory at 126-128 MB used. Lambda also
+  # scales CPU with memory, so 128 MB made those reads take 18-22 s — past API
+  # Gateway's fixed 29 s integration timeout on the heavier endpoints.
+  memory_size = 1024
 
   source_path = [
     {
