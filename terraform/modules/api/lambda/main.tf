@@ -421,6 +421,11 @@ resource "aws_iam_role_policy" "agents_orchestrator" {
           "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/stage-skipping",
           # Platform default for project PR delivery inheritance.
           "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/pr-strategy",
+          # Bedrock auth-path selector ('api-key' | 'role'), written from the
+          # Admin Agent Credentials card (unit-admin-auth-path-selection is the
+          # sole runtime writer) and read by the AgentCore credential resolver.
+          # Created by the agentcore Terraform module (unit-bedrock-iam-grant).
+          "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/bedrock-auth-method",
           # Composer LLM-bypass toggle (deterministic keyword match vs always-LLM).
           "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/compose-llm-bypass",
           # Global custom MCP servers injected into every agent session (merged

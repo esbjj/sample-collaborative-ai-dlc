@@ -5,11 +5,13 @@
 import { useEffect, useState } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { KeyRound } from 'lucide-react';
-import { agentsService, type AgentSettings } from '@/services/agents';
+import { agentsService, type AgentSettings, type BedrockAuthMethod } from '@/services/agents';
 import { SettingsCard } from '@/components/settings/SettingsCard';
 import { ConfigStatusBadge } from '@/components/settings/ConfigStatusBadge';
 import { SecretField } from '@/components/settings/SecretField';
 import { SaveStatusButton, type SaveResult } from '@/components/settings/SaveStatusButton';
+import { BedrockAuthMethodField } from './BedrockAuthMethodField';
+import { BedrockRoleInfoNote } from './BedrockRoleInfoNote';
 
 type SecretName = 'bedrockBearerToken' | 'kiroApiKey';
 
@@ -18,6 +20,7 @@ export function AgentCredentialsCard() {
   const [loading, setLoading] = useState(true);
   const [bearerToken, setBearerToken] = useState('');
   const [kiroApiKey, setKiroApiKey] = useState('');
+  const [authMethod, setAuthMethod] = useState<BedrockAuthMethod>('api-key');
   const [saving, setSaving] = useState(false);
   const [clearingSecret, setClearingSecret] = useState<SecretName | null>(null);
   const [saveResult, setSaveResult] = useState<SaveResult>(null);
@@ -25,29 +28,46 @@ export function AgentCredentialsCard() {
   useEffect(() => {
     agentsService
       .getSettings()
-      .then(setSettings)
+      .then((fresh) => {
+        setSettings(fresh);
+        // Initialize from the (backend-normalized) selection; default api-key
+        // so an untouched deployment renders exactly as before (zero regression).
+        setAuthMethod(fresh.bedrockAuthMethod ?? 'api-key');
+      })
       .catch((e) => console.error('Failed to load agent settings:', e))
       .finally(() => setLoading(false));
   }, []);
 
-  const hasChanges = bearerToken !== '' || kiroApiKey !== '';
+  const loadedAuthMethod = settings?.bedrockAuthMethod ?? 'api-key';
+  // Save enables on a typed secret OR a method-only change (BR-6.1).
+  const hasChanges = bearerToken !== '' || kiroApiKey !== '' || authMethod !== loadedAuthMethod;
 
   const save = async () => {
     setSaving(true);
     setSaveResult(null);
     try {
-      const update: { bedrockBearerToken?: string; kiroApiKey?: string } = {};
+      const update: {
+        bedrockBearerToken?: string;
+        kiroApiKey?: string;
+        bedrockAuthMethod?: BedrockAuthMethod;
+      } = {};
       // Only send secret fields the user actually typed.
       if (bearerToken !== '') update.bedrockBearerToken = bearerToken;
       if (kiroApiKey !== '') update.kiroApiKey = kiroApiKey;
+      // Include the auth method only when it changed from the loaded value
+      // (BR-6.2 — minimal PUT).
+      if (authMethod !== loadedAuthMethod) update.bedrockAuthMethod = authMethod;
       await agentsService.updateSettings(update);
       const fresh = await agentsService.getSettings();
       setSettings(fresh);
+      setAuthMethod(fresh.bedrockAuthMethod ?? 'api-key');
       setBearerToken('');
       setKiroApiKey('');
       setSaveResult('saved');
     } catch (e) {
       console.error('Failed to save agent credentials:', e);
+      // Preserve the current selection on failure (BR-6.3) — do NOT revert
+      // authMethod; the inline error offers a retry.
       setSaveResult('error');
     } finally {
       setSaving(false);
@@ -103,24 +123,39 @@ export function AgentCredentialsCard() {
         </div>
       ) : (
         <div className="space-y-5">
-          <SecretField
-            id="bedrock-bearer-token"
-            label="Bedrock Bearer Token"
-            isSet={!!settings?.bedrockBearerTokenSet}
-            notSetLabel="Required"
-            value={bearerToken}
-            onChange={setBearerToken}
-            emptyPlaceholder="Enter AWS_BEARER_TOKEN_BEDROCK value"
-            rotatePlaceholder="Enter new token to rotate, or leave blank"
-            onClear={() => clearSecret('bedrockBearerToken')}
-            clearing={clearingSecret === 'bedrockBearerToken'}
+          <BedrockAuthMethodField
+            value={authMethod}
+            onChange={setAuthMethod}
             disabled={saving || clearingSecret !== null}
-            helpText={
-              <>
-                Used by Claude Code and OpenCode agents as{' '}
-                <code className="bg-muted px-1 rounded text-[10px]">AWS_BEARER_TOKEN_BEDROCK</code>{' '}
-                — without it they won't start.
-              </>
+            apiKeySlot={
+              <SecretField
+                id="bedrock-bearer-token"
+                label="Bedrock Bearer Token"
+                isSet={!!settings?.bedrockBearerTokenSet}
+                notSetLabel="Required"
+                value={bearerToken}
+                onChange={setBearerToken}
+                emptyPlaceholder="Enter AWS_BEARER_TOKEN_BEDROCK value"
+                rotatePlaceholder="Enter new token to rotate, or leave blank"
+                onClear={() => clearSecret('bedrockBearerToken')}
+                clearing={clearingSecret === 'bedrockBearerToken'}
+                disabled={saving || clearingSecret !== null}
+                helpText={
+                  <>
+                    Used by Claude Code and OpenCode agents as{' '}
+                    <code className="bg-muted px-1 rounded text-[10px]">
+                      AWS_BEARER_TOKEN_BEDROCK
+                    </code>{' '}
+                    — without it they won't start.
+                  </>
+                }
+              />
+            }
+            roleSlot={
+              <BedrockRoleInfoNote
+                bothConfigured={authMethod === 'role' && !!settings?.bedrockBearerTokenSet}
+                onClearKey={() => clearSecret('bedrockBearerToken')}
+              />
             }
           />
           <SecretField
