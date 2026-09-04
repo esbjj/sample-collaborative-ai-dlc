@@ -277,6 +277,11 @@ export const handler = async (event) => {
       const stageSkippingPath = `${prefix}/stage-skipping`;
       const composeLlmBypassPath = `${prefix}/compose-llm-bypass`;
       const prStrategyPath = `${prefix}/pr-strategy`;
+      // Bedrock auth-path selector (unit-admin-auth-path-selection): non-secret
+      // String enum { api-key, role } created by the agentcore Terraform module
+      // (unit-bedrock-iam-grant) and read at runtime by the credential resolver
+      // (unit-credential-resolution-adapter). Batched into the existing read.
+      const bedrockAuthMethodPath = `${prefix}/bedrock-auth-method`;
       try {
         const result = await ssm.send(
           new GetParametersCommand({
@@ -290,6 +295,7 @@ export const handler = async (event) => {
               stageSkippingPath,
               composeLlmBypassPath,
               prStrategyPath,
+              bedrockAuthMethodPath,
             ],
             WithDecryption: true,
           }),
@@ -312,6 +318,13 @@ export const handler = async (event) => {
         const composeLlmBypass =
           byName[composeLlmBypassPath] === 'disabled' ? 'disabled' : 'enabled';
         const prStrategy = byName[prStrategyPath] === 'pr-per-unit' ? 'pr-per-unit' : 'intent-pr';
+        // Bedrock auth-path selector: fail-safe normalization — any missing
+        // parameter, empty string, "placeholder" sentinel, or unrecognized
+        // value collapses to the 'api-key' default (BR-1.2). Only an exact
+        // 'role' selects the short-lived STS/role path. Guarantees the UI
+        // always renders a valid selection and preserves zero regression
+        // (nfr-sts-zero-regression) for deployments that never set the field.
+        const bedrockAuthMethod = byName[bedrockAuthMethodPath] === 'role' ? 'role' : 'api-key';
         // Custom MCP servers may carry secrets in env/headers — only expose the
         // raw config to platform admins (the only ones who can edit it). Others
         // get an empty object so the non-secret settings fields still load.
@@ -370,6 +383,8 @@ export const handler = async (event) => {
           stageSkipping,
           composeLlmBypass,
           prStrategy,
+          // Non-secret enum ('api-key' | 'role'); safe to echo (BR-1.3, BR-3.1).
+          bedrockAuthMethod,
           customMcpServers,
           customMcpServerNames,
           mcpSecretsSet,
@@ -568,6 +583,38 @@ export const handler = async (event) => {
         } catch (err) {
           console.error('[settings] Failed to write PR strategy:', err.message);
           errors.push('prStrategy: ' + err.message);
+        }
+      }
+
+      if (input.bedrockAuthMethod !== undefined) {
+        // Bedrock auth-path choice (unit-admin-auth-path-selection): persist the
+        // admin's selection as a NON-SECRET String parameter, mirroring the
+        // prStrategy pattern above. This unit is the sole runtime writer (INV-3);
+        // Terraform (unit-bedrock-iam-grant) creates it with ignore_changes=[value]
+        // and the credential resolver (unit-credential-resolution-adapter) is the
+        // sole reader. Enum-validate BEFORE any SSM write (BR-2.1); an invalid
+        // value returns 400 with an allow-listed message and issues no AWS call.
+        if (input.bedrockAuthMethod !== 'api-key' && input.bedrockAuthMethod !== 'role') {
+          return response(400, {
+            error: 'Invalid bedrockAuthMethod value',
+            issues: ['bedrockAuthMethod must be "api-key" or "role"'],
+          });
+        }
+        // Selecting 'role' is non-destructive: it never clears or rewrites a
+        // stored bearer token (BR-4.2). Precedence (role wins) is enforced at
+        // runtime by the resolver, not by mutating stored state here.
+        try {
+          await ssm.send(
+            new PutParameterCommand({
+              Name: `${prefix}/bedrock-auth-method`,
+              Value: input.bedrockAuthMethod,
+              Type: 'String',
+              Overwrite: true,
+            }),
+          );
+        } catch (err) {
+          console.error('[settings] Failed to write bedrock auth method:', err.message);
+          errors.push('bedrockAuthMethod: ' + err.message);
         }
       }
 
