@@ -75,6 +75,10 @@ export interface AgentCapabilities {
   models?: Partial<Record<AgentCli, AgentModel[]>>;
 }
 
+/** Bedrock authentication path selector. 'api-key' uses the stored bearer
+ *  token; 'role' uses short-lived STS/SigV4 execution-role credentials. */
+export type BedrockAuthMethod = 'api-key' | 'role';
+
 export interface AgentSettings {
   /** True when a bearer token is stored in SSM (value is never returned to the browser) */
   bedrockBearerTokenSet: boolean;
@@ -101,6 +105,10 @@ export interface AgentSettings {
   composeLlmBypass?: 'enabled' | 'disabled';
   /** Platform default for spaces that inherit PR delivery policy. */
   prStrategy?: 'intent-pr' | 'pr-per-unit';
+  /** Which Bedrock auth path new agent sessions resolve. Defaults to 'api-key'
+   *  (fail-safe normalized on read); 'role' uses short-lived STS credentials.
+   *  Selection takes effect on the next agent start. */
+  bedrockAuthMethod?: BedrockAuthMethod;
   /** Global custom MCP servers (raw JSON string, name-keyed JSON object)
    *  injected into every agent session; merged under a project's own set.
    *  Only returned to platform admins. */
@@ -151,6 +159,8 @@ export interface AgentSettingsUpdate {
   composeLlmBypass?: 'enabled' | 'disabled';
   /** Platform default PR delivery strategy. Omit to leave unchanged. */
   prStrategy?: 'intent-pr' | 'pr-per-unit';
+  /** Bedrock auth path ('api-key' | 'role'). Omit to leave unchanged. */
+  bedrockAuthMethod?: BedrockAuthMethod;
   /** Global custom MCP servers (raw JSON string). Omit to leave unchanged. */
   customMcpServers?: string;
   /** Global MCP secret values keyed by `${VAR}` name. A non-empty value rotates;
