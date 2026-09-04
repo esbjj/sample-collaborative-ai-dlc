@@ -671,6 +671,52 @@ locals {
     SOURCE_CONTROL_FUNCTION       = "${var.project_name}-source-control-${var.environment}"
     MCP_SECRETS_SSM_PREFIX        = "/${var.project_name}/${var.environment}"
     RUNTIME_COMPATIBILITY_VERSION = "1"
+
+    # STOPGAP (2026-08-30) — neutralize a target repo's husky pre-push gate.
+    #
+    # The engine's git operations are plain `git commit` / `git push`
+    # (git-engine.js) with no --no-verify and no core.hooksPath override, so once
+    # an agent runs an install in the workspace, husky's `prepare` writes
+    # core.hooksPath into .git/config — which lives on the PERSISTED /mnt/workspace
+    # mount and survives every restore. node_modules, by contrast, is a symlink to
+    # container-local /tmp (workspace.js redirectHeavyDirs) and does NOT survive a
+    # new microVM. Every subsequent container therefore has the repo's hooks armed
+    # with the toolchain they need missing, so the gate can never pass: the lane
+    # dies at init-lane, which pushes BEFORE any agent could reinstall deps.
+    # Deterministic, so `retry` can never clear it.
+    #
+    # SKIP_VERIFY=1 is the aquarium-dashboard pre-push hook's own documented
+    # escape hatch; git passes process.env through to hooks, so this is honored
+    # without any engine change. Repo-specific and GLOBAL to every project on this
+    # deployment — remove once the engine runs its own git with hooks disabled.
+    SKIP_VERIFY = "1"
+
+    # STOPGAP (2026-09-04) — disable target-repo git hooks for ALL git in the
+    # container, superseding SKIP_VERIFY above (which only works for hooks that
+    # happen to honor it; this deployment's own fork ignores it entirely).
+    #
+    # Root cause, verified from the AgentCore logs of intent
+    # 2ff09473-6452-4023-a757-b29a6be8f61f (unit-credential-resolution-spike):
+    # the engine's `git commit` (git-engine.js:276, no --no-verify, no
+    # core.hooksPath) runs the target repo's husky pre-commit hook. In
+    # sample-collaborative-ai-dlc that hook's LAST line is an unguarded
+    # `npx vitest run --changed`, and the selected suite is testcontainers-backed
+    # (test/gremlin-setup.js -> tinkerpop/gremlin-server). There is no Docker
+    # daemon in the microVM, so it dies with "Could not find a working container
+    # runtime strategy" -> hook exit 1 -> commit_failed -> git_commit_failed.
+    # lint-staged/oxlint/secretlint all COMPLETED; the test line is the blocker.
+    # Environmental and unfixable in-container, and deterministic, so the
+    # engine's 3x retry and the human `retry` gate can never clear it.
+    #
+    # git treats GIT_CONFIG_{KEY,VALUE}_n with `-c` precedence, so this outranks
+    # the core.hooksPath that husky's `prepare` wrote into the .git/config on the
+    # PERSISTED /mnt/workspace mount. Verified empirically against git 2.50.
+    # Deliberately container-wide (the agent's own git loses hooks too) because
+    # the engine offers no scoped knob. REMOVE once the engine runs its own git
+    # with hooks disabled and records the hook verdict instead.
+    GIT_CONFIG_COUNT   = "1"
+    GIT_CONFIG_KEY_0   = "core.hooksPath"
+    GIT_CONFIG_VALUE_0 = "/dev/null"
   }
 }
 
