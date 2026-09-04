@@ -255,6 +255,44 @@ describe('opencode driver', () => {
   });
 });
 
+// ── Bedrock STS role-path child-env shape (unit-credential-resolution-adapter) ──
+// The role auth path works by OMISSION: the auth-resolver leaves
+// AWS_BEARER_TOKEN_BEDROCK unpopulated, and each Bedrock-invoking driver's
+// envForAuth must then emit region + CLI flags ONLY (no bearer). These assertions
+// pin that seam — the adapter's correctness-by-omission strategy depends on it —
+// without changing drivers.js. (BR-10, BR-11.)
+describe('role-path child env: envForAuth omits the bearer when absent', () => {
+  it('claude driver emits region + Bedrock flags only, no bearer', () => {
+    const out = claudeDriver.envForAuth({ AWS_REGION: 'us-east-1' });
+    expect(out.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined();
+    expect(out).toMatchObject({
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      AWS_REGION: 'us-east-1',
+      IS_SANDBOX: '1',
+    });
+  });
+
+  it('opencode driver emits region + XDG only, no bearer', () => {
+    const out = opencodeDriver.envForAuth({ AWS_REGION: 'us-east-1' });
+    expect(out.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined();
+    expect(out).toMatchObject({ AWS_REGION: 'us-east-1', OPENCODE_DISABLE_AUTOUPDATE: '1' });
+  });
+
+  it('codex driver emits region only, no bearer', () => {
+    const out = codexDriver.envForAuth({ AWS_REGION: 'us-east-1' });
+    expect(out.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined();
+    expect(out).toEqual({ AWS_REGION: 'us-east-1' });
+  });
+
+  it('codex driver forwards the bearer only when present (api-key path)', () => {
+    const out = codexDriver.envForAuth({
+      AWS_REGION: 'us-east-1',
+      AWS_BEARER_TOKEN_BEDROCK: 'tok',
+    });
+    expect(out.AWS_BEARER_TOKEN_BEDROCK).toBe('tok');
+  });
+});
+
 describe('Kiro session capture', () => {
   it('lists sessions as JSON', () => {
     expect(buildKiroListSessions()).toEqual({
