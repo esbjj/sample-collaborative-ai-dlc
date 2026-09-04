@@ -292,6 +292,60 @@ resource "aws_iam_role" "agentcore" {
   tags = var.tags
 }
 
+# ---------------------------------------------------------------------------
+# Bedrock model-invocation grant scope (unit-bedrock-iam-grant)
+#   Enumerated, least-privilege set of model ARNs the execution role may invoke
+#   on the short-lived-role auth path (bedrockAuthMethod = "role"). NEVER a
+#   wildcard: a security reviewer reads the exact bounded model set here
+#   (SEC02-BP02 / fr-sts-bedrock-invoke-permission / nfr-sts-temporary-least-privilege).
+#
+#   Kept consistent with the runtime supported-model catalogue in
+#   lambda/agentcore/model-resolver.js (DEFAULT_ALIASES → anthropic.claude-*,
+#   plus the openai.gpt-5.* family invoked by Codex). A model absent from this
+#   list is IAM-denied (fail-closed, diagnosable AccessDenied) rather than
+#   silently widened. When the resolver catalogue gains a model, append its id
+#   here and re-apply.
+# ---------------------------------------------------------------------------
+locals {
+  # Geo prefix for cross-region inference profiles, derived from the deploy
+  # region — mirrors lambda/agentcore/model-resolver.js regionPrefix().
+  bedrock_inference_geo = startswith(var.aws_region, "eu-") ? "eu" : (startswith(var.aws_region, "ap-") ? "apac" : "us")
+
+  # Bare foundation-model ids the runtime can resolve/invoke. Sourced from the
+  # model-resolver catalogue (Claude family) plus the Codex OpenAI family.
+  bedrock_foundation_model_ids = [
+    "anthropic.claude-opus-4-6-v1",
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-haiku-4-5-20251001",
+    "openai.gpt-5.5",
+  ]
+
+  # Ids invoked through cross-region inference profiles carry the geo prefix
+  # (us./eu./apac.). Codex's OpenAI ids are called by EXACT id with no geo
+  # prefix (see model-resolver.js), so only the Claude family is profiled.
+  bedrock_inference_profile_ids = [
+    for id in local.bedrock_foundation_model_ids :
+    "${local.bedrock_inference_geo}.${id}"
+    if startswith(id, "anthropic.")
+  ]
+
+  # The enumerated Resource list for the invoke grant: both ARN forms per model.
+  #   - foundation-model ARNs are account-less, region-scoped
+  #   - inference-profile ARNs are account-scoped, region-prefixed
+  # Region/partition-templated so the same HCL is correct across partitions
+  # (commercial + GovCloud) with no per-region duplication.
+  bedrock_model_arns = concat(
+    [
+      for id in local.bedrock_foundation_model_ids :
+      "arn:${local.partition}:bedrock:${data.aws_region.current.region}::foundation-model/${id}"
+    ],
+    [
+      for id in local.bedrock_inference_profile_ids :
+      "arn:${local.partition}:bedrock:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${id}"
+    ],
+  )
+}
+
 resource "aws_iam_role_policy" "agentcore" {
   name = "agentcore-policy"
   role = aws_iam_role.agentcore.id
@@ -362,8 +416,10 @@ resource "aws_iam_role_policy" "agentcore" {
       ] : [],
       [
         {
-          # Read agent model + bearer/api-key settings at startup (no Bedrock IAM —
-          # Claude/Kiro authenticate via the bearer token / API key, as in v1).
+          # Read agent model + bearer/api-key settings at startup. On the
+          # short-lived-role auth path the runtime also reads the
+          # bedrockAuthMethod selector (unit-bedrock-iam-grant); the scoped
+          # Bedrock invoke grant below authorizes the role path itself.
           Effect = "Allow"
           Action = ["ssm:GetParameter", "ssm:GetParameters"]
           Resource = [
@@ -371,7 +427,21 @@ resource "aws_iam_role_policy" "agentcore" {
             aws_ssm_parameter.kiro_api_key.arn,
             aws_ssm_parameter.cli_models.arn,
             aws_ssm_parameter.tier_models.arn,
+            aws_ssm_parameter.bedrock_auth_method.arn,
           ]
+        },
+        {
+          # Bedrock model invocation on the short-lived-role auth-path
+          # (bedrockAuthMethod = "role"): the CLI signs InvokeModel with the
+          # execution role's temporary SigV4 credentials instead of a stored
+          # bearer token. Least-privilege per SEC02-BP02 — invoke-only, over an
+          # enumerated model-ARN set (local.bedrock_model_arns), NEVER bedrock:*
+          # and NEVER Resource "*". Streaming action included because agent CLIs
+          # stream token output. Additive: this statement is appended, leaving
+          # every pre-existing permission (and the v1 bearer-token path) intact.
+          Effect   = "Allow"
+          Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+          Resource = local.bedrock_model_arns
         },
         {
           # MCP secrets: at stage start (and verify) the runtime resolves the
@@ -438,7 +508,29 @@ resource "aws_ssm_parameter" "bedrock_bearer_token" {
   tags = var.tags
 }
 
-# Default agent models by CLI — JSON object managed by the Admin UI at runtime.
+# Bedrock auth-path selector (unit-bedrock-iam-grant) — chooses how the runtime
+# authenticates to Bedrock for model invocation:
+#   "api-key" (default) → export AWS_BEARER_TOKEN_BEDROCK, exactly as v1.
+#   "role"              → omit the bearer token so the CLI resolves the
+#                         execution role's short-lived SigV4 credentials from
+#                         the standard AWS chain (authorized by the scoped
+#                         bedrock:InvokeModel grant on aws_iam_role_policy.agentcore).
+# NON-secret String (a mode flag, not a credential). Defaults to "api-key" so an
+# untouched deployment behaves byte-identically to v1 (nfr-sts-zero-regression).
+# Single-writer at runtime: the Admin settings API writes it; the resolver reads
+# it. ignore_changes keeps an admin's choice across applies (BR-PARAM-04).
+resource "aws_ssm_parameter" "bedrock_auth_method" {
+  name        = "/${var.project_name}/${var.environment}/bedrock-auth-method"
+  description = "Bedrock auth path for model invocation: api-key | role (Admin UI managed)"
+  type        = "String"
+  value       = "api-key"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+
+  tags = var.tags
+}
 resource "aws_ssm_parameter" "cli_models" {
   name        = "/${var.project_name}/${var.environment}/cli-models"
   description = "Default agent model IDs by CLI (JSON object)"
@@ -669,6 +761,7 @@ resource "awscc_bedrockagentcore_runtime" "stage_executor" {
     CREDENTIAL_BROKER_FUNCTION    = "${var.project_name}-credential-broker-${var.environment}"
     SOURCE_CONTROL_FUNCTION       = "${var.project_name}-source-control-${var.environment}"
     BEDROCK_BEARER_TOKEN_SSM_PATH = aws_ssm_parameter.bedrock_bearer_token.name
+    BEDROCK_AUTH_METHOD_SSM_PATH  = aws_ssm_parameter.bedrock_auth_method.name
     KIRO_API_KEY_SSM_PATH         = aws_ssm_parameter.kiro_api_key.name
     # Base SSM prefix for MCP secret resolution ({prefix}/mcp-secrets/<VAR> and
     # {prefix}/projects/<id>/mcp-secrets/<VAR>).
