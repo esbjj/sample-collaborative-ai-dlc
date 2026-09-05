@@ -66,3 +66,59 @@ describe('platform PR strategy settings', () => {
     expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
   });
 });
+
+describe('bedrock auth method settings', () => {
+  it('reads role and fails safe to api-key for absent/unknown values', async () => {
+    // Explicit 'role' is returned verbatim.
+    ssmMock.on(GetParametersCommand).resolves({
+      Parameters: [{ Name: '/collab/dev/bedrock-auth-method', Value: 'role' }],
+    });
+    const roleRes = await handler(event('GET'));
+    expect(roleRes.statusCode).toBe(200);
+    expect(JSON.parse(roleRes.body).bedrockAuthMethod).toBe('role');
+
+    // Unknown value → fail-safe to api-key (BR-1.2).
+    ssmMock.on(GetParametersCommand).resolves({
+      Parameters: [{ Name: '/collab/dev/bedrock-auth-method', Value: 'sigv4' }],
+    });
+    const unknownRes = await handler(event('GET'));
+    expect(JSON.parse(unknownRes.body).bedrockAuthMethod).toBe('api-key');
+
+    // Absent parameter → api-key default (zero regression).
+    ssmMock.on(GetParametersCommand).resolves({ Parameters: [] });
+    const absentRes = await handler(event('GET'));
+    expect(JSON.parse(absentRes.body).bedrockAuthMethod).toBe('api-key');
+  });
+
+  it('allows only platform admins to write the auth method as a non-secret String', async () => {
+    const denied = await handler(event('PUT', { bedrockAuthMethod: 'role' }));
+    expect(denied.statusCode).toBe(403);
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+
+    ssmMock.on(PutParameterCommand).resolves({});
+    const allowed = await handler(event('PUT', { bedrockAuthMethod: 'role' }, 'platform-admin'));
+    expect(allowed.statusCode).toBe(200);
+    expect(ssmMock.commandCalls(PutParameterCommand)[0].args[0].input).toMatchObject({
+      Name: '/collab/dev/bedrock-auth-method',
+      Value: 'role',
+      Type: 'String',
+      Overwrite: true,
+    });
+  });
+
+  it('rejects invalid auth-method values with 400 before any SSM write', async () => {
+    const response = await handler(event('PUT', { bedrockAuthMethod: 'sigv4' }, 'platform-admin'));
+    expect(response.statusCode).toBe(400);
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('does not touch the auth method when the field is omitted (partial update)', async () => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    const response = await handler(event('PUT', { prStrategy: 'intent-pr' }, 'platform-admin'));
+    expect(response.statusCode).toBe(200);
+    const authWrites = ssmMock
+      .commandCalls(PutParameterCommand)
+      .filter((c) => c.args[0].input.Name === '/collab/dev/bedrock-auth-method');
+    expect(authWrites).toHaveLength(0);
+  });
+});

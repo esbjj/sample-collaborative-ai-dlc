@@ -25,6 +25,14 @@ const AUTH_ENV = {
   codex: 'AWS_BEARER_TOKEN_BEDROCK',
 };
 
+// CLIs whose auth target is Bedrock (Kiro uses its own service + API key). On the
+// 'role' auth path the auth-resolver intentionally omits AWS_BEARER_TOKEN_BEDROCK
+// so each CLI signs with the execution role's short-lived SigV4 credentials — so
+// for these CLIs the ABSENCE of a bearer token is the expected, working state and
+// must not read as unauthed. auth-resolver publishes the resolved method as the
+// non-secret BEDROCK_AUTH_METHOD marker for exactly this reason.
+const BEDROCK_CLIS = new Set(['claude', 'opencode', 'codex']);
+
 export const capabilities = async (_payload, deps = {}) => {
   const {
     discoverInstalledClis = defaultDiscover,
@@ -42,10 +50,14 @@ export const capabilities = async (_payload, deps = {}) => {
   // Per-CLI availability: installed AND authed. The UI uses `available` to gate
   // selection (running an un-authed CLI just fails), and surfaces `installed` /
   // `authed` so it can explain WHY a CLI is unavailable.
+  const roleAuth = (env.BEDROCK_AUTH_METHOD ?? 'api-key') === 'role';
   const clis = SUPPORTED_CLIS.map((cli) => {
     const isInstalled = installed.includes(cli);
     const authEnv = AUTH_ENV[cli];
-    const isAuthed = authEnv ? Boolean(env[authEnv]) : true;
+    // Role path: the execution role IS the credential for the Bedrock-backed
+    // CLIs, so they are authed without a bearer token in env.
+    const isAuthed =
+      roleAuth && BEDROCK_CLIS.has(cli) ? true : authEnv ? Boolean(env[authEnv]) : true;
     return { cli, installed: isInstalled, authed: isAuthed, available: isInstalled && isAuthed };
   });
 
