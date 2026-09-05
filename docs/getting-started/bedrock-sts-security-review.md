@@ -180,9 +180,9 @@ role/SigV4 credentials from the standard AWS chain (decision
 `acquireShortLivedBedrockKey` seam and no ephemeral-token minting path in the
 codebase. The role path relies purely on the execution role's temporary SigV4
 credentials, so there is **no additional credential-minting surface** to review.
-(The spike harness itself lives under
-`lambda/agentcore/spike/credential-resolution/` and produces only a
-secret-free verdict; it ships no production credential code.)
+(The spike that produced that verdict was a throwaway harness, run outside this
+change set and recorded in the intent history rather than the repository; it
+ships no production credential code.)
 
 _Verified against_ the absence of any mint/fallback implementation in
 `lambda/` and the deferral decision `dec-spike-first-fallback-deferred`.
