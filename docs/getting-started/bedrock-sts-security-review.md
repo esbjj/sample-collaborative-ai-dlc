@@ -38,42 +38,46 @@ statement appended additively to the **existing** AgentCore execution role.
   `bedrock:InvokeModelWithResponseStream`. The streaming action is included
   because the agent CLIs stream token output. No other Bedrock action is
   granted.
-- **`Resource` is an enumerated model set, never a model wildcard.** The grant is
-  two statements. The first lists the exact _cross-region inference profiles_ the
-  runtime may address — the deployment's own geography (`us.` / `eu.` / `apac.`,
-  derived from the deploy Region) plus the `global.` profiles the model picker
-  offers — account- and Region-scoped. The second lists the _underlying
-  foundation models_ by exact id. There is **no `bedrock:*`** and **no
-  `Resource = "*"`**.
+- **`Resource` is scoped by provider family, never `"*"`.** The grant is two
+  statements. The first lists the _cross-region inference profiles_ the runtime
+  may address, as ARN patterns bounded to the Anthropic Claude and OpenAI/Codex
+  families in the deployment's own geography (`us.` / `eu.` / `apac.`, derived
+  from the deploy Region) plus the `global.` profiles — account- and
+  Region-scoped. The second covers the _underlying foundation models_ of those
+  same two families. There is **no `bedrock:*`** and **no `Resource = "*"`**.
+- **Why family patterns rather than a pinned model list.** Model selection is a
+  runtime choice: an administrator picks from every ACTIVE Claude profile the
+  deployment can invoke, and does so per deployment, per project, per agent tier.
+  A grant enumerating specific model versions would deny selections the product's
+  own picker offered, and would fail on the next model release. That is a version
+  lock rather than a security control, and it would break the feature's core
+  premise — that choosing the role path changes only _how_ the runtime
+  authenticates, never _which_ models are available.
+- **What the family scope still excludes.** Any other provider — Amazon Nova and
+  Titan, Meta Llama, Mistral, Cohere, AI21, and anything added in future — is
+  denied, as is any profile from another geography. A `us-*` deployment cannot
+  invoke `eu.*` profiles and vice versa.
 - **The foundation-model ARNs wildcard only the Region segment, and only because
   IAM requires it.** A cross-region inference profile routes a request to any
   Region in its geography, and the invoke is authorized against the foundation
   model _in the destination Region_ — AWS states that a policy naming an
   inference profile "must also specify the foundation model in each Region
   associated with it". Pinning that segment to the deploy Region makes every
-  invoke fail with `AccessDenied` on a destination-Region model ARN. The model id
-  itself remains fully enumerated.
+  invoke fail with `AccessDenied` on a destination-Region model ARN.
 - **That second statement is fenced by a condition.** The foundation-model ARNs
   authorize an invoke only when `bedrock:InferenceProfileArn` matches one of the
-  enumerated profiles, so they grant nothing on their own. A direct on-demand
-  invoke of a bare foundation-model id carries no such key and is denied.
-- **A model not on the list is denied, not silently allowed.** Because the
-  resource set is enumerated, invoking an un-listed model fails closed with a
-  diagnosable IAM `AccessDenied`. Widening the scope requires adding the model ARN
-  and re-applying Terraform — it cannot happen implicitly.
-- **Model ids are reconciled against live Bedrock.** An id that does not exist
-  grants nothing, and its failure at invoke time is indistinguishable from a
-  deliberate denial, so the catalogue is checked against
-  `bedrock:ListInferenceProfiles` / `bedrock:ListFoundationModels` in the deploy
-  Region rather than assumed.
+  profiles in the first statement, so they grant nothing on their own. A direct
+  on-demand invoke of a bare foundation-model id carries no such key and is
+  denied.
 - **The grant is additive.** The statements are appended to the execution role's
   existing inline policy; no pre-existing permission is modified, reordered, or
   removed.
 
 _Verified against_ the Terraform grant delivered by `unit-bedrock-iam-grant` in
-`terraform/modules/compute/agentcore/main.tf` (the appended
-`bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` statement scoped
-to the `local.bedrock_model_arns` enumerated list). See the
+`terraform/modules/compute/agentcore/main.tf` (the two appended
+`bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` statements scoped
+to `local.bedrock_inference_profile_arns` and, condition-fenced,
+`local.bedrock_foundation_model_arns`). See the
 [[security-design-unit-bedrock-iam-grant]] and [[business-rules-unit-bedrock-iam-grant]]
 for the full rule set.
 
@@ -185,14 +189,14 @@ _Verified against_ the absence of any mint/fallback implementation in
 
 ## Reviewer sign-off summary
 
-| Reviewer question (SEC02-BP02)                      | Answer                                                                                                                                                                                     |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Is the Bedrock grant least-privilege?               | **Yes** — invoke-only (`bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`) over an enumerated model-ARN list, no wildcard, appended additively to the existing execution role. |
-| Are long-lived secrets eliminated on the role path? | **Yes** — the role path stores no Bedrock secret; short-lived SigV4 via the execution role, AWS-native IAM + STS only.                                                                     |
-| Both credentials configured?                        | **Role wins**, informational (non-error); the stored key is left unused, never deleted.                                                                                                    |
-| Can existing deployments break?                     | **No** — default `api-key`, byte-for-byte unchanged, opt-in, reversible.                                                                                                                   |
-| Who can change the selection?                       | **Platform admins only** (`requirePlatformAdmin`), enum-validated before any write.                                                                                                        |
-| Conditional API-key fallback shipped?               | **No** — deferred and not built; no minting surface.                                                                                                                                       |
+| Reviewer question (SEC02-BP02)                      | Answer                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Is the Bedrock grant least-privilege?               | **Yes** — invoke-only (`bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`), scoped to two provider families in the deployment's own geography, no `bedrock:*` and no `Resource = "*"`; the foundation-model statement is condition-fenced to those profiles. Appended additively to the existing execution role. |
+| Are long-lived secrets eliminated on the role path? | **Yes** — the role path stores no Bedrock secret; short-lived SigV4 via the execution role, AWS-native IAM + STS only.                                                                                                                                                                                                       |
+| Both credentials configured?                        | **Role wins**, informational (non-error); the stored key is left unused, never deleted.                                                                                                                                                                                                                                      |
+| Can existing deployments break?                     | **No** — default `api-key`, byte-for-byte unchanged, opt-in, reversible.                                                                                                                                                                                                                                                     |
+| Who can change the selection?                       | **Platform admins only** (`requirePlatformAdmin`), enum-validated before any write.                                                                                                                                                                                                                                          |
+| Conditional API-key fallback shipped?               | **No** — deferred and not built; no minting surface.                                                                                                                                                                                                                                                                         |
 
 This document contains no secret material. Credentials and environment variables
 (for example `AWS_BEARER_TOKEN_BEDROCK`) are referenced by **name only**, never by
