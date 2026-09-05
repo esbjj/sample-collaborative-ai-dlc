@@ -72,6 +72,14 @@ export const resolveAuthMethod = async ({ env = process.env, get } = {}) => {
 export const resolveAgentAuth = async ({ env = process.env, getParam } = {}) => {
   const get = getParam ?? defaultGetParam(new SSMClient({ region: env.AWS_REGION || 'us-east-1' }));
   const method = await resolveAuthMethod({ env, get });
+  // Publish the resolved method as a NON-SECRET marker on the same env object.
+  // The capabilities probe reports per-CLI `authed` from the presence of an auth
+  // secret, but on the 'role' path there is deliberately no bearer token to find
+  // — the execution role's SigV4 credentials are the auth. Without this marker
+  // capabilities would report claude/opencode/codex as unauthed, and the project
+  // Agent settings UI gates selection on that flag (AgentTab.tsx `isCliAvailable`),
+  // so the role path would make exactly the CLIs it enables unselectable.
+  env.BEDROCK_AUTH_METHOD = method;
   const resolved = [];
   for (const [target, pathEnv] of Object.entries(SSM_PATH_ENV)) {
     // Role path: omit the Bedrock bearer token entirely (precedence + role auth).

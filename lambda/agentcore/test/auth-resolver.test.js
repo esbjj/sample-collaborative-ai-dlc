@@ -128,6 +128,31 @@ describe('resolveAgentAuth — role path (bearer omission + precedence)', () => 
     expect(resolved).toContain('KIRO_API_KEY');
   });
 
+  // The capabilities probe has no other way to tell "no bearer because role path"
+  // (working) from "no bearer at all" (broken), and the Agent settings UI gates CLI
+  // selection on what that probe reports — so the resolved method must be published.
+  it('publishes the resolved method as the non-secret BEDROCK_AUTH_METHOD marker', async () => {
+    for (const [stored, expected] of [
+      ['role', 'role'],
+      ['api-key', 'api-key'],
+      ['nonsense', 'api-key'],
+    ]) {
+      const env = {
+        BEDROCK_AUTH_METHOD_SSM_PATH: '/p/method',
+        BEDROCK_BEARER_TOKEN_SSM_PATH: '/p/bedrock',
+      };
+      const store = { '/p/method': stored, '/p/bedrock': 'bearer-xyz' };
+      await resolveAgentAuth({ env, getParam: async (n) => store[n] ?? '' });
+      expect(env.BEDROCK_AUTH_METHOD, `stored=${stored}`).toBe(expected);
+    }
+  });
+
+  it('marks api-key in the marker when no selector path is configured at all', async () => {
+    const env = { BEDROCK_BEARER_TOKEN_SSM_PATH: '/p/bedrock' };
+    await resolveAgentAuth({ env, getParam: async () => 'bearer-xyz' });
+    expect(env.BEDROCK_AUTH_METHOD).toBe('api-key');
+  });
+
   it('role path: SSM error on the selector fails safe to api-key (bearer populated)', async () => {
     const env = {
       BEDROCK_AUTH_METHOD_SSM_PATH: '/p/method',

@@ -91,4 +91,55 @@ describe('capabilities command', () => {
     expect(res.ok).toBe(true);
     expect(res.clis.every((c) => !c.installed && !c.available)).toBe(true);
   });
+
+  // The 'role' auth path deliberately leaves AWS_BEARER_TOKEN_BEDROCK unset — the
+  // execution role's SigV4 credentials are the auth. Reading the absent bearer as
+  // "unauthed" would report the Bedrock CLIs unavailable and, because AgentTab
+  // gates selection on `available`, make the role path disable exactly the CLIs
+  // it enables. Proven live on dev before this was fixed.
+  it('treats the Bedrock CLIs as authed on the role path, with no bearer token', async () => {
+    const res = await capabilities(
+      {},
+      {
+        discoverInstalledClis: async () => ['claude', 'opencode', 'codex', 'kiro'],
+        captureChild: async () => ({ stdout: KIRO_LIST_JSON }),
+        env: { BEDROCK_AUTH_METHOD: 'role', KIRO_API_KEY: 'k' },
+      },
+    );
+    const byCli = Object.fromEntries(res.clis.map((c) => [c.cli, c]));
+    for (const cli of ['claude', 'opencode', 'codex']) {
+      expect(byCli[cli], cli).toMatchObject({ installed: true, authed: true, available: true });
+    }
+    expect(byCli.kiro).toMatchObject({ authed: true, available: true });
+  });
+
+  it('does not mask a missing Kiro API key on the role path', async () => {
+    const res = await capabilities(
+      {},
+      {
+        discoverInstalledClis: async () => ['claude', 'kiro'],
+        captureChild: async () => ({ stdout: KIRO_LIST_JSON }),
+        env: { BEDROCK_AUTH_METHOD: 'role' }, // no KIRO_API_KEY
+      },
+    );
+    const byCli = Object.fromEntries(res.clis.map((c) => [c.cli, c]));
+    expect(byCli.claude).toMatchObject({ authed: true, available: true });
+    expect(byCli.kiro).toMatchObject({ installed: true, authed: false, available: false });
+  });
+
+  it('still requires a bearer token when the method is api-key or absent', async () => {
+    for (const env of [{ BEDROCK_AUTH_METHOD: 'api-key' }, {}]) {
+      const res = await capabilities(
+        {},
+        { discoverInstalledClis: async () => ['claude', 'opencode', 'codex'], env },
+      );
+      const byCli = Object.fromEntries(res.clis.map((c) => [c.cli, c]));
+      for (const cli of ['claude', 'opencode', 'codex']) {
+        expect(byCli[cli], `${cli} with ${JSON.stringify(env)}`).toMatchObject({
+          authed: false,
+          available: false,
+        });
+      }
+    }
+  });
 });
