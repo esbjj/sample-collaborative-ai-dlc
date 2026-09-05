@@ -38,17 +38,35 @@ statement appended additively to the **existing** AgentCore execution role.
   `bedrock:InvokeModelWithResponseStream`. The streaming action is included
   because the agent CLIs stream token output. No other Bedrock action is
   granted.
-- **`Resource` is an enumerated model-ARN list, never a wildcard.** The list is
-  built from a bounded catalogue of model IDs (the Claude family plus the OpenAI
-  family invoked by Codex), rendered in both the _foundation-model_ and
-  _cross-region inference-profile_ ARN forms, and templated per partition and
-  region so the same policy is correct across commercial and GovCloud partitions.
-  There is **no `bedrock:*`** and **no `Resource = "*"`**.
+- **`Resource` is an enumerated model set, never a model wildcard.** The grant is
+  two statements. The first lists the exact _cross-region inference profiles_ the
+  runtime may address — the deployment's own geography (`us.` / `eu.` / `apac.`,
+  derived from the deploy Region) plus the `global.` profiles the model picker
+  offers — account- and Region-scoped. The second lists the _underlying
+  foundation models_ by exact id. There is **no `bedrock:*`** and **no
+  `Resource = "*"`**.
+- **The foundation-model ARNs wildcard only the Region segment, and only because
+  IAM requires it.** A cross-region inference profile routes a request to any
+  Region in its geography, and the invoke is authorized against the foundation
+  model _in the destination Region_ — AWS states that a policy naming an
+  inference profile "must also specify the foundation model in each Region
+  associated with it". Pinning that segment to the deploy Region makes every
+  invoke fail with `AccessDenied` on a destination-Region model ARN. The model id
+  itself remains fully enumerated.
+- **That second statement is fenced by a condition.** The foundation-model ARNs
+  authorize an invoke only when `bedrock:InferenceProfileArn` matches one of the
+  enumerated profiles, so they grant nothing on their own. A direct on-demand
+  invoke of a bare foundation-model id carries no such key and is denied.
 - **A model not on the list is denied, not silently allowed.** Because the
   resource set is enumerated, invoking an un-listed model fails closed with a
   diagnosable IAM `AccessDenied`. Widening the scope requires adding the model ARN
   and re-applying Terraform — it cannot happen implicitly.
-- **The grant is additive.** The statement is appended to the execution role's
+- **Model ids are reconciled against live Bedrock.** An id that does not exist
+  grants nothing, and its failure at invoke time is indistinguishable from a
+  deliberate denial, so the catalogue is checked against
+  `bedrock:ListInferenceProfiles` / `bedrock:ListFoundationModels` in the deploy
+  Region rather than assumed.
+- **The grant is additive.** The statements are appended to the execution role's
   existing inline policy; no pre-existing permission is modified, reordered, or
   removed.
 

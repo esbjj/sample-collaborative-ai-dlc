@@ -296,12 +296,20 @@ resource "aws_iam_role" "agentcore" {
 # Bedrock model-invocation grant scope (unit-bedrock-iam-grant)
 #   Enumerated, least-privilege set of model ARNs the execution role may invoke
 #   on the short-lived-role auth path (bedrockAuthMethod = "role"). NEVER a
-#   wildcard: a security reviewer reads the exact bounded model set here
+#   model wildcard: a security reviewer reads the exact bounded model set here
 #   (SEC02-BP02 / fr-sts-bedrock-invoke-permission / nfr-sts-temporary-least-privilege).
 #
+#   Rendered as TWO statements on aws_iam_role_policy.agentcore: the inference
+#   profiles the runtime addresses, and their underlying foundation models
+#   conditioned on arriving through one of those profiles. Every model id below
+#   was reconciled against live bedrock:ListInferenceProfiles /
+#   bedrock:ListFoundationModels — an id that does not exist grants nothing and
+#   fails as an AccessDenied at invoke time, which is indistinguishable from a
+#   deliberate denial.
+#
 #   Kept consistent with the runtime supported-model catalogue in
-#   lambda/agentcore/model-resolver.js (DEFAULT_ALIASES → anthropic.claude-*,
-#   plus the openai.gpt-5.* family invoked by Codex). A model absent from this
+#   lambda/agentcore/model-resolver.js (DEFAULT_ALIASES → anthropic.claude-*)
+#   plus the openai.gpt-5.6 family invoked by Codex. A model absent from this
 #   list is IAM-denied (fail-closed, diagnosable AccessDenied) rather than
 #   silently widened. When the resolver catalogue gains a model, append its id
 #   here and re-apply.
@@ -311,39 +319,70 @@ locals {
   # region — mirrors lambda/agentcore/model-resolver.js regionPrefix().
   bedrock_inference_geo = startswith(var.aws_region, "eu-") ? "eu" : (startswith(var.aws_region, "ap-") ? "apac" : "us")
 
-  # Bare foundation-model ids the runtime can resolve/invoke. Sourced from the
-  # model-resolver catalogue (Claude family) plus the Codex OpenAI family.
-  bedrock_foundation_model_ids = [
+  # Claude foundation-model ids the runtime can resolve/invoke. Sourced from the
+  # model-resolver catalogue (DEFAULT_ALIASES). Ids are EXACT — the haiku id
+  # carries the `-v1:0` suffix, without which both the foundation-model and the
+  # inference-profile ARN name a resource that does not exist and the invoke is
+  # denied (verified against bedrock:ListInferenceProfiles).
+  bedrock_claude_model_ids = [
     "anthropic.claude-opus-4-6-v1",
     "anthropic.claude-sonnet-4-6",
-    "anthropic.claude-haiku-4-5-20251001",
-    "openai.gpt-5.5",
+    "anthropic.claude-haiku-4-5-20251001-v1:0",
   ]
 
-  # Ids invoked through cross-region inference profiles carry the geo prefix
-  # (us./eu./apac.). Codex's OpenAI ids are called by EXACT id with no geo
-  # prefix (see model-resolver.js), so only the Claude family is profiled.
-  bedrock_inference_profile_ids = [
-    for id in local.bedrock_foundation_model_ids :
-    "${local.bedrock_inference_geo}.${id}"
-    if startswith(id, "anthropic.")
+  # OpenAI (Codex) foundation-model ids. These support the INFERENCE_PROFILE
+  # inference type ONLY and publish no geo-scoped profile — the sole profile form
+  # is `global.openai.…`, so they are profiled separately from the Claude family.
+  bedrock_openai_model_ids = [
+    "openai.gpt-5.6-sol",
+    "openai.gpt-5.6-luna",
+    "openai.gpt-5.6-terra",
   ]
 
-  # The enumerated Resource list for the invoke grant: both ARN forms per model.
-  #   - foundation-model ARNs are account-less, region-scoped
-  #   - inference-profile ARNs are account-scoped, region-prefixed
-  # Region/partition-templated so the same HCL is correct across partitions
-  # (commercial + GovCloud) with no per-region duplication.
-  bedrock_model_arns = concat(
-    [
-      for id in local.bedrock_foundation_model_ids :
-      "arn:${local.partition}:bedrock:${data.aws_region.current.region}::foundation-model/${id}"
-    ],
-    [
-      for id in local.bedrock_inference_profile_ids :
-      "arn:${local.partition}:bedrock:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${id}"
-    ],
+  bedrock_foundation_model_ids = concat(local.bedrock_claude_model_ids, local.bedrock_openai_model_ids)
+
+  # Inference-profile ids the runtime may address. Claude carries BOTH the
+  # deployment's geo prefix and `global.` — lambda/shared/bedrock-models.js
+  # (isUsable) offers the region's own geo AND global profiles in the model
+  # picker, so a grant covering only the geo form denies a selection the UI
+  # itself presented. OpenAI/Codex is global-only.
+  bedrock_inference_profile_ids = concat(
+    [for id in local.bedrock_claude_model_ids : "${local.bedrock_inference_geo}.${id}"],
+    [for id in local.bedrock_claude_model_ids : "global.${id}"],
+    [for id in local.bedrock_openai_model_ids : "global.${id}"],
   )
+
+  # Inference-profile ARNs: account-scoped and addressed in the REQUESTING
+  # region (the deploy region), for both the geo and the global form.
+  bedrock_inference_profile_arns = [
+    for id in local.bedrock_inference_profile_ids :
+    "arn:${local.partition}:bedrock:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${id}"
+  ]
+
+  # Underlying foundation-model ARNs. The REGION SEGMENT IS WILDCARDED, and this
+  # is load-bearing rather than laxity: a cross-region inference profile routes a
+  # request to any Region in its geography, and IAM authorizes the invoke against
+  # the foundation model IN THE DESTINATION REGION, not the requesting one. AWS
+  # states it directly — "when you specify an inference profile in the Resource
+  # field, you must also specify the foundation model in each Region associated
+  # with it" (bedrock/latest/userguide/inference-profiles-prereq.html).
+  #
+  # Verified empirically: with this segment pinned to the deploy region, every
+  # invoke of eu.anthropic.claude-sonnet-4-6 from eu-central-1 failed with
+  #   AccessDenied … on resource:
+  #   arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-sonnet-4-6
+  # because that profile routes across eu-central-1, eu-north-1, eu-west-1,
+  # eu-west-3, eu-south-1 and eu-south-2. The `*` also matches the EMPTY region
+  # segment that `global.` profiles carry for their underlying model.
+  #
+  # Scope is NOT widened by this: the model id stays fully enumerated (no
+  # `bedrock:*`, no `Resource = "*"`, no model wildcard), and the accompanying
+  # bedrock:InferenceProfileArn condition means these ARNs authorize nothing
+  # except an invoke arriving through one of the enumerated profiles above.
+  bedrock_foundation_model_arns = [
+    for id in local.bedrock_foundation_model_ids :
+    "arn:${local.partition}:bedrock:*::foundation-model/${id}"
+  ]
 }
 
 resource "aws_iam_role_policy" "agentcore" {
@@ -432,16 +471,37 @@ resource "aws_iam_role_policy" "agentcore" {
         },
         {
           # Bedrock model invocation on the short-lived-role auth-path
-          # (bedrockAuthMethod = "role"): the CLI signs InvokeModel with the
-          # execution role's temporary SigV4 credentials instead of a stored
-          # bearer token. Least-privilege per SEC02-BP02 — invoke-only, over an
-          # enumerated model-ARN set (local.bedrock_model_arns), NEVER bedrock:*
-          # and NEVER Resource "*". Streaming action included because agent CLIs
-          # stream token output. Additive: this statement is appended, leaving
-          # every pre-existing permission (and the v1 bearer-token path) intact.
+          # (bedrockAuthMethod = "role"), part 1 of 2: the inference profiles the
+          # runtime may address. The CLI signs InvokeModel with the execution
+          # role's temporary SigV4 credentials instead of a stored bearer token.
+          # Least-privilege per SEC02-BP02 — invoke-only, over an enumerated
+          # profile-ARN set, NEVER bedrock:* and NEVER Resource "*". Streaming
+          # action included because agent CLIs stream token output. Additive:
+          # appended, leaving every pre-existing permission (and the v1
+          # bearer-token path) intact.
           Effect   = "Allow"
           Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-          Resource = local.bedrock_model_arns
+          Resource = local.bedrock_inference_profile_arns
+        },
+        {
+          # Part 2 of 2: the underlying foundation models, in EVERY Region a
+          # cross-region profile may route to (see local.bedrock_foundation_model_arns
+          # for why the region segment is wildcarded — without it the invoke is
+          # denied on the destination Region's model ARN).
+          #
+          # The condition is what keeps this least-privilege: these ARNs authorize
+          # an invoke ONLY when it arrives through one of the enumerated inference
+          # profiles above. A direct on-demand invoke of a bare foundation-model id
+          # carries no bedrock:InferenceProfileArn and is therefore denied here —
+          # which is also the stricter posture AWS documents for this pattern.
+          Effect   = "Allow"
+          Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+          Resource = local.bedrock_foundation_model_arns
+          Condition = {
+            StringLike = {
+              "bedrock:InferenceProfileArn" = local.bedrock_inference_profile_arns
+            }
+          }
         },
         {
           # MCP secrets: at stage start (and verify) the runtime resolves the
