@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AlertCircle, KeyRound } from 'lucide-react';
+import { AlertCircle, ChevronRight, KeyRound } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
   agentsService,
   type AgentCredentialStatus,
@@ -67,6 +68,13 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
   // needs the value precisely when the preflight has just failed, because that is
   // the trust policy they are about to write (dec-external-id-storage).
   const [externalId, setExternalId] = useState<string | null>(null);
+  // A scope stores exactly ONE Bedrock value in one SSM parameter, so this is a
+  // genuine either/or rather than two independent fields. The radio makes that
+  // model visible and shows only the inputs the chosen method needs.
+  const [bedrockMethod, setBedrockMethod] = useState<'role' | 'bearer'>('role');
+  // The principal and external ID are read-only reference values, needed only while
+  // writing a trust policy — collapsed by default so they do not crowd the inputs.
+  const [trustDetailsOpen, setTrustDetailsOpen] = useState(false);
 
   // Role mode is deliberately unavailable at personal scope: that endpoint is gated
   // only on authentication, so any member could otherwise name a role ARN
@@ -77,6 +85,12 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
     if (!isCurrentIdentity()) return false;
     const applied = (result: AgentCredentialStatus) => {
       setSettings(result);
+      // Start on the method this scope is ALREADY using, so the form describes the
+      // stored state rather than a default. An unconfigured scope starts on the
+      // recommended method.
+      if (result.bedrockMode === 'bearer' || result.bedrockMode === 'role') {
+        setBedrockMethod(result.bedrockMode);
+      }
       // An idempotent read, not a one-time reveal: recovering the value is a plain
       // read rather than a rotation (dec-external-id-not-secret).
       //
@@ -120,6 +134,8 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
     setErrorMessage(null);
     setPreflight(null);
     setExternalId(null);
+    setBedrockMethod(scope === 'personal' ? 'bearer' : 'role');
+    setTrustDetailsOpen(false);
     load()
       .catch((error) => {
         if (!isCurrentIdentity()) return;
@@ -141,19 +157,12 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
   };
 
   const trimmedRoleArn = roleArn.trim();
-  const hasChanges = bearerToken !== '' || kiroApiKey !== '' || trimmedRoleArn !== '';
-  // A scope holds ONE Bedrock binding, so a role ARN and a bearer token in the same
-  // save is ambiguous rather than additive.
-  const conflictingBedrockInput = trimmedRoleArn !== '' && bearerToken !== '';
+  // The radio makes a role ARN and a bearer token mutually exclusive by
+  // construction, so only the selected method's input can contribute a change.
+  const bedrockInput = bedrockMethod === 'role' ? trimmedRoleArn : bearerToken;
+  const hasChanges = bedrockInput !== '' || kiroApiKey !== '';
 
   const save = async () => {
-    if (conflictingBedrockInput) {
-      setErrorMessage(
-        'Choose one Bedrock credential: an IAM role ARN or a bearer token, not both.',
-      );
-      setSaveResult('error');
-      return;
-    }
     setSaving(true);
     setSaveResult(null);
     setErrorMessage(null);
@@ -164,10 +173,9 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
       // the value holds is a property of the value, so no new field, no new
       // parameter and no new provider (req-single-parameter-encoding). The external
       // ID is never sent — the server generates and attaches its own.
-      if (trimmedRoleArn !== '') {
-        value.bedrockBearerToken = JSON.stringify({ roleArn: trimmedRoleArn });
-      } else if (bearerToken !== '') {
-        value.bedrockBearerToken = bearerToken;
+      if (bedrockInput !== '') {
+        value.bedrockBearerToken =
+          bedrockMethod === 'role' ? JSON.stringify({ roleArn: trimmedRoleArn }) : bearerToken;
       }
       if (kiroApiKey !== '') value.kiroApiKey = kiroApiKey;
       const result = await update(value);
@@ -182,7 +190,8 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
       console.error(`Failed to save ${scope} agent credentials:`, error);
       // A rejected preflight is an INPUT error, so it is rendered as guidance the
       // operator can act on rather than as a generic failure. The external ID comes
-      // back with the rejection precisely so the trust policy can be fixed.
+      // back with the rejection precisely so the trust policy can be fixed, and the
+      // reference values are opened because that is exactly when they are needed.
       if (error instanceof ApiError && error.body?.code === 'BEDROCK_ROLE_PREFLIGHT_FAILED') {
         const body = error.body as {
           preflight?: BedrockPreflightFailure;
@@ -190,6 +199,7 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
         };
         if (body.preflight) setPreflight(body.preflight);
         if (body.bedrockExternalId) setExternalId(body.bedrockExternalId);
+        setTrustDetailsOpen(true);
       }
       setErrorMessage(error instanceof Error ? error.message : 'Failed to save agent credentials');
       setSaveResult('error');
@@ -305,24 +315,75 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
         </div>
       ) : (
         <div className="space-y-5">
-          {roleSupported && (
+          {roleSupported ? (
+            <div className="space-y-2.5" data-testid={`${scope}-bedrock-auth`}>
+              <p className="text-xs font-medium text-foreground">Bedrock authentication</p>
+              {(['role', 'bearer'] as const).map((method) => {
+                const selected = bedrockMethod === method;
+                return (
+                  <label
+                    key={method}
+                    className="flex cursor-pointer items-start gap-2"
+                    htmlFor={`${scope}-bedrock-method-${method}`}
+                  >
+                    <input
+                      id={`${scope}-bedrock-method-${method}`}
+                      type="radio"
+                      name={`${scope}-bedrock-method`}
+                      // The visible label carries a badge and a description, so an
+                      // explicit accessible name keeps the control addressable.
+                      aria-label={method === 'role' ? 'IAM role' : 'Bearer token'}
+                      checked={selected}
+                      onChange={() => setBedrockMethod(method)}
+                      disabled={saving || clearingSecret !== null}
+                      className="mt-1 accent-primary"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2 text-xs font-medium text-foreground">
+                        {method === 'role' ? 'IAM role' : 'Bearer token'}
+                        <span
+                          className={`rounded-sm px-1.5 py-0.5 text-[10px] font-medium ${
+                            method === 'role'
+                              ? 'bg-primary/10 text-primary'
+                              : 'bg-muted text-muted-foreground'
+                          }`}
+                        >
+                          {method === 'role' ? 'Recommended' : 'Deprecated'}
+                        </span>
+                        <ConfigStatusBadge
+                          ok={bedrockMode === method}
+                          okLabel="Set"
+                          notOkLabel="Not set"
+                        />
+                      </span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        {method === 'role'
+                          ? 'Short-lived credentials are minted per invocation by assuming a role. No secret is stored.'
+                          : 'A long-lived key stored as a secret, where an IAM role needs none.'}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+              {/* One SSM parameter holds the Bedrock value, so switching method and
+                  saving REPLACES the other one. Said plainly rather than discovered. */}
+              {bedrockMode && bedrockMode !== bedrockMethod && (
+                <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                  Saving replaces the {bedrockMode === 'role' ? 'IAM role binding' : 'bearer token'}{' '}
+                  currently in use for this scope.
+                </p>
+              )}
+            </div>
+          ) : null}
+
+          {roleSupported && bedrockMethod === 'role' && (
             <div className="space-y-1.5" data-testid={`${scope}-bedrock-role`}>
-              <div className="flex items-center justify-between gap-2">
-                <label
-                  htmlFor={`${scope}-bedrock-role-arn`}
-                  className="flex items-center gap-2 text-xs font-medium text-foreground"
-                >
-                  Bedrock IAM Role
-                  <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                    Recommended
-                  </span>
-                  <ConfigStatusBadge
-                    ok={bedrockMode === 'role'}
-                    okLabel="Set"
-                    notOkLabel="Not set"
-                  />
-                </label>
-              </div>
+              <label
+                htmlFor={`${scope}-bedrock-role-arn`}
+                className="text-xs font-medium text-foreground"
+              >
+                Role ARN
+              </label>
               {settings?.bedrockRoleArn && (
                 <p className="truncate font-mono text-[11px] text-muted-foreground">
                   {settings.bedrockRoleArn}
@@ -341,25 +402,51 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
                 className="font-mono text-xs"
               />
               <p className="text-[11px] text-muted-foreground">
-                Short-lived credentials are minted per invocation by assuming this role, so no
-                secret is stored. Its trust policy must name this deployment&apos;s credential
-                broker.
+                Enables Claude Code, OpenCode and Codex.{fallbackText('bedrock') ?? ''}
               </p>
-              {settings?.bedrockBrokerRoleArn && (
-                <RevealableValue
-                  id={`${scope}-bedrock-broker-role`}
-                  label="Principal to trust"
-                  value={settings.bedrockBrokerRoleArn}
-                  helpText="The role's trust policy must allow sts:AssumeRole for this principal. Add an sts:RoleSessionName condition to limit which spaces may use the role."
-                />
-              )}
-              {externalId && (
-                <RevealableValue
-                  id={`${scope}-bedrock-external-id`}
-                  label="External ID"
-                  value={externalId}
-                  helpText="Add this as an sts:ExternalId condition in the role's trust policy. Generated by the platform, required for a role in another AWS account, and safe to read again at any time."
-                />
+              {(settings?.bedrockBrokerRoleArn || externalId) && (
+                <Collapsible open={trustDetailsOpen} onOpenChange={setTrustDetailsOpen}>
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      data-testid={`${scope}-trust-details-toggle`}
+                      className="flex w-full items-center gap-1.5 pt-1 text-left"
+                    >
+                      <ChevronRight
+                        className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${trustDetailsOpen ? 'rotate-90' : ''}`}
+                      />
+                      <span className="text-xs font-medium text-foreground">
+                        Trust policy details
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">
+                        {externalId
+                          ? 'principal and external ID to allow in the role'
+                          : 'principal to allow in the role'}
+                      </span>
+                    </button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="space-y-3 pt-3">
+                      {settings?.bedrockBrokerRoleArn && (
+                        <RevealableValue
+                          id={`${scope}-bedrock-broker-role`}
+                          label="Principal to trust"
+                          value={settings.bedrockBrokerRoleArn}
+                          masked={false}
+                          helpText="The role's trust policy must allow sts:AssumeRole for this principal. Add an sts:RoleSessionName condition to limit which spaces may use the role."
+                        />
+                      )}
+                      {externalId && (
+                        <RevealableValue
+                          id={`${scope}-bedrock-external-id`}
+                          label="External ID"
+                          value={externalId}
+                          helpText="Add this as an sts:ExternalId condition in the role's trust policy. Generated by the platform, required for a role in another AWS account, and safe to read again at any time."
+                        />
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
               )}
               {preflight && (
                 <div
@@ -380,23 +467,22 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
               )}
             </div>
           )}
-          <SecretField
-            id={`${scope}-bedrock-bearer-token`}
-            label={roleSupported ? 'Bedrock Bearer Token (deprecated)' : 'Bedrock Bearer Token'}
-            isSet={bedrockMode === 'bearer'}
-            value={bearerToken}
-            onChange={setBearerToken}
-            emptyPlaceholder="Enter AWS_BEARER_TOKEN_BEDROCK value"
-            rotatePlaceholder="Enter a new token to rotate, or leave blank"
-            onClear={() => clearSecret('bedrockBearerToken')}
-            clearing={clearingSecret === 'bedrockBearerToken'}
-            disabled={saving || clearingSecret !== null}
-            helpText={`Enables Claude Code, OpenCode and Codex.${
-              roleSupported
-                ? ' Deprecated: a long-lived key stored as a secret, where an IAM role needs none.'
-                : ''
-            }${fallbackText('bedrock') ?? ''}`}
-          />
+
+          {(!roleSupported || bedrockMethod === 'bearer') && (
+            <SecretField
+              id={`${scope}-bedrock-bearer-token`}
+              label={roleSupported ? 'Bearer token value' : 'Bedrock Bearer Token'}
+              isSet={bedrockMode === 'bearer'}
+              value={bearerToken}
+              onChange={setBearerToken}
+              emptyPlaceholder="Enter AWS_BEARER_TOKEN_BEDROCK value"
+              rotatePlaceholder="Enter a new token to rotate, or leave blank"
+              onClear={() => clearSecret('bedrockBearerToken')}
+              clearing={clearingSecret === 'bedrockBearerToken'}
+              disabled={saving || clearingSecret !== null}
+              helpText={`Enables Claude Code, OpenCode and Codex.${fallbackText('bedrock') ?? ''}`}
+            />
+          )}
           <SecretField
             id={`${scope}-kiro-api-key`}
             label="Kiro API Key"
@@ -412,7 +498,7 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
           />
           <SaveStatusButton
             onClick={save}
-            disabled={!hasChanges || conflictingBedrockInput || clearingSecret !== null}
+            disabled={!hasChanges || clearingSecret !== null}
             saving={saving}
             label="Save Credentials"
             result={saveResult}
