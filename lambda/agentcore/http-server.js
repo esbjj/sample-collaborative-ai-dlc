@@ -257,6 +257,9 @@ const main = async () => {
     capabilities: (p, context) =>
       capabilities(p, {
         env: context.env,
+        // Availability is a question about the RESOLVED binding, not about a
+        // secret env var: a Bedrock role binding sets no bearer token.
+        resolvedProviders: context.resolvedProviders,
         discoverInstalledClis: async () => installedClis,
       }),
     managedRuntimeCheck: (p) => managedRuntimeCheck(p, { workspaceDir }),
