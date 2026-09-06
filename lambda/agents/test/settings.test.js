@@ -3,6 +3,7 @@ import { mockClient } from 'aws-sdk-client-mock';
 import {
   DeleteParameterCommand,
   SSMClient,
+  GetParameterCommand,
   GetParametersCommand,
   PutParameterCommand,
 } from '@aws-sdk/client-ssm';
@@ -30,6 +31,11 @@ const event = (method, body, groups = null) => ({
 beforeAll(async () => {
   process.env.AGENT_SETTINGS_SSM_PREFIX = '/collab/dev';
   process.env.AGENT_CREDENTIAL_METADATA_FUNCTION = 'credential-metadata-test';
+  // The account this deployment runs in. Set explicitly so a role ARN in the same
+  // account is recognised as same-account and no external ID is generated
+  // (dec-external-id-scope); without it the handler would fall back to
+  // sts:GetCallerIdentity.
+  process.env.PLATFORM_ACCOUNT_ID = '111122223333';
   ({ handler } = await import('../index.js'));
 });
 
@@ -259,5 +265,206 @@ describe('the ungated settings read exposes no binding detail', () => {
     expect(body.bedrockRoleArn).toBeUndefined();
     expect(response.body).not.toContain(ROLE_ARN);
     expect(response.body).not.toContain(EXTERNAL_ID);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-external-id-lifecycle,
+// req-same-and-cross-account, req-configured-semantics.
+//
+// The bootstrap order is generate → surface → operator writes the trust policy →
+// save → preflight, so the save response is what hands the operator the value they
+// must paste. It is returned here because this route is platform-admin gated — the
+// same principal that may overwrite the binding.
+describe('platform cross-account role binding external ID', () => {
+  const CROSS_ACCOUNT = 'arn:aws:iam::444455556666:role/aidlc-bedrock-inference';
+  const externalIdPath = '/collab/dev/bedrock-external-id';
+  const bindingPath = '/collab/dev/bedrock-bearer-token';
+
+  const writtenByName = () =>
+    Object.fromEntries(
+      ssmMock
+        .commandCalls(PutParameterCommand)
+        .map(({ args }) => [args[0].input.Name, args[0].input]),
+    );
+
+  it('generates, stores and returns an external ID, and copies it into the binding', async () => {
+    ssmMock
+      .on(GetParameterCommand)
+      .rejects(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }));
+    ssmMock.on(PutParameterCommand).resolves({});
+
+    const response = await handler(
+      event(
+        'PUT',
+        { bedrockBearerToken: JSON.stringify({ roleArn: CROSS_ACCOUNT }) },
+        'platform-admin',
+      ),
+    );
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.bedrockRoleArn).toBe(CROSS_ACCOUNT);
+    expect(body.bedrockExternalId).toBeTruthy();
+
+    const written = writtenByName();
+    // Stored in its own parameter so it survives a rejected save, and copied into
+    // the binding so the broker reads it at resolution time.
+    expect(written[externalIdPath]).toMatchObject({ Type: 'SecureString' });
+    expect(written[externalIdPath].Value).toBe(body.bedrockExternalId);
+    expect(JSON.parse(written[bindingPath].Value)).toStrictEqual({
+      roleArn: CROSS_ACCOUNT,
+      externalId: body.bedrockExternalId,
+    });
+  });
+
+  it('reuses the stored value on a later save rather than rotating it', async () => {
+    // This is what makes the bootstrap converge: the operator writes the trust
+    // policy against the first value, and the retry must present the same one.
+    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'already-generated-value' } });
+    ssmMock.on(PutParameterCommand).resolves({});
+
+    const response = await handler(
+      event(
+        'PUT',
+        { bedrockBearerToken: JSON.stringify({ roleArn: CROSS_ACCOUNT }) },
+        'platform-admin',
+      ),
+    );
+
+    expect(JSON.parse(response.body).bedrockExternalId).toBe('already-generated-value');
+    expect(writtenByName()[externalIdPath]).toBeUndefined();
+    expect(JSON.parse(writtenByName()[bindingPath].Value).externalId).toBe(
+      'already-generated-value',
+    );
+  });
+
+  it('refuses a client-supplied external ID without writing anything', async () => {
+    const response = await handler(
+      event(
+        'PUT',
+        {
+          bedrockBearerToken: JSON.stringify({
+            roleArn: CROSS_ACCOUNT,
+            externalId: 'operator-invented',
+          }),
+        },
+        'platform-admin',
+      ),
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).code).toBe('BEDROCK_EXTERNAL_ID_NOT_ACCEPTED');
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('returns the value to a platform admin on a later read, and to nobody else', async () => {
+    credentialMetadataHandler = () => ({
+      ok: true,
+      status: {
+        bedrockBearerTokenSet: false,
+        kiroApiKeySet: false,
+        bedrockMode: 'role',
+        bedrockRoleArn: CROSS_ACCOUNT,
+        bedrockExternalIdSet: true,
+      },
+    });
+    ssmMock.on(GetParametersCommand).resolves({ Parameters: [] });
+    // The parameter EXISTS in both cases — the difference must come from the gate,
+    // not from the value being absent.
+    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'the-stored-external-id' } });
+
+    const admin = JSON.parse((await handler(event('GET', undefined, 'platform-admin'))).body);
+    expect(admin.bedrockExternalId).toBe('the-stored-external-id');
+    expect(admin.bedrockRoleArn).toBe(CROSS_ACCOUNT);
+
+    const ordinary = await handler(event('GET'));
+    const body = JSON.parse(ordinary.body);
+    expect(body.bedrockExternalIdSet).toBe(true);
+    expect(body.bedrockExternalId).toBeUndefined();
+    expect(body.bedrockRoleArn).toBeUndefined();
+    expect(ordinary.body).not.toContain('the-stored-external-id');
+    expect(ordinary.body).not.toContain(CROSS_ACCOUNT);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-binding-preflight.
+//
+// Saving a role binding attempts an AssumeRole through the broker and refuses to
+// persist a binding that cannot be assumed, converting a mid-stage failure into an
+// input-validation error.
+describe('platform role binding preflight', () => {
+  const CROSS_ACCOUNT = 'arn:aws:iam::444455556666:role/aidlc-bedrock-inference';
+  const saveRole = () =>
+    handler(
+      event(
+        'PUT',
+        { bedrockBearerToken: JSON.stringify({ roleArn: CROSS_ACCOUNT }) },
+        'platform-admin',
+      ),
+    );
+
+  beforeEach(() => {
+    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'stable-external-id' } });
+    ssmMock.on(PutParameterCommand).resolves({});
+  });
+
+  it('refuses to persist a binding the broker cannot assume, and still returns the external ID', async () => {
+    credentialMetadataHandler = (request) =>
+      request.action === 'preflight-bedrock-role-binding'
+        ? {
+            ok: true,
+            preflight: {
+              ok: false,
+              cause: 'trust-policy-rejected',
+              sessionName: 'aidlc-preflight',
+              candidates: [{ candidate: 'principal-not-trusted', detail: 'trust the broker' }],
+            },
+          }
+        : { ok: true, status: { bedrockBearerTokenSet: false, kiroApiKeySet: false } };
+
+    const response = await saveRole();
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.body);
+    expect(body.code).toBe('BEDROCK_ROLE_PREFLIGHT_FAILED');
+    expect(body.preflight.cause).toBe('trust-policy-rejected');
+    // The binding itself must NOT be persisted.
+    const written = ssmMock.commandCalls(PutParameterCommand).map(({ args }) => args[0].input.Name);
+    expect(written).not.toContain('/collab/dev/bedrock-bearer-token');
+    // But the external ID must still come back: the operator cannot write the very
+    // trust policy this preflight is checking until they have it, and it is stable
+    // across retries so their trust policy stays valid.
+    expect(body.bedrockExternalId).toBe('stable-external-id');
+  });
+
+  it('persists the binding when the preflight passes', async () => {
+    credentialMetadataHandler = (request) =>
+      request.action === 'preflight-bedrock-role-binding'
+        ? { ok: true, preflight: { ok: true, cause: 'ok', sessionName: 'aidlc-preflight' } }
+        : { ok: true, status: { bedrockBearerTokenSet: false, kiroApiKeySet: false } };
+
+    const response = await saveRole();
+
+    expect(response.statusCode).toBe(200);
+    expect(
+      ssmMock.commandCalls(PutParameterCommand).map(({ args }) => args[0].input.Name),
+    ).toContain('/collab/dev/bedrock-bearer-token');
+  });
+
+  it('persists the binding when the preflight itself could not run', async () => {
+    // Fail-open, deliberately: the preflight is an input check, not a security
+    // control. Resolution re-checks the binding on every stage, so refusing a
+    // legitimate save because the checker is unreachable would be the worse failure.
+    credentialMetadataHandler = (request) => {
+      if (request.action === 'preflight-bedrock-role-binding') return { ok: false, code: 'BOOM' };
+      return { ok: true, status: { bedrockBearerTokenSet: false, kiroApiKeySet: false } };
+    };
+
+    const response = await saveRole();
+
+    expect(response.statusCode).toBe(200);
+    expect(
+      ssmMock.commandCalls(PutParameterCommand).map(({ args }) => args[0].input.Name),
+    ).toContain('/collab/dev/bedrock-bearer-token');
   });
 });

@@ -29,6 +29,9 @@ beforeAll(async () => {
   vi.stubEnv('QUESTIONS_TABLE', 'agent-questions-test');
   vi.stubEnv('AGENT_SETTINGS_SSM_PREFIX', '/collab/dev');
   vi.stubEnv('AGENT_CREDENTIAL_METADATA_FUNCTION', 'credential-metadata-test');
+  // Same account as the role ARNs used below, so those bindings are same-account
+  // and generate no external ID (dec-external-id-scope).
+  vi.stubEnv('PLATFORM_ACCOUNT_ID', '111122223333');
   vi.stubEnv('AGENT_CREDENTIAL_GRANT_SECRET', 'g'.repeat(48));
   vi.stubEnv('AGENTCORE_RUNTIME_ARN', 'arn:aws:bedrock-agentcore:eu:1:runtime/test');
   ({ handler } = await import('../index.js'));
