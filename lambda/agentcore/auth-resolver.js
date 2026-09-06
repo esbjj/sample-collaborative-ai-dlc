@@ -11,6 +11,7 @@
 import {
   AGENT_CREDENTIAL_ENV_NAMES,
   AGENT_CREDENTIAL_PROVIDERS,
+  CREDENTIAL_VALUE_KINDS,
   credentialEnvName,
   credentialProviderForCli,
   normalizeCredentialBinding,
@@ -23,6 +24,15 @@ const bindingKey = (binding) =>
 const grantMismatch = () =>
   Object.assign(new Error('Agent credential grant does not match this invocation'), {
     code: 'credential_grant_mismatch',
+  });
+// The broker refused or could not resolve the binding. Distinct from a mismatch:
+// the grant was valid, the credential was not obtainable
+// (specs/bedrock-iam-role-credential-mode: req-expiry-failure-legible). The
+// broker's allowlisted code is the only detail carried — never provider text.
+const resolutionFailed = (code) =>
+  Object.assign(new Error('Agent credential resolution failed'), {
+    code: 'credential_resolution_failed',
+    brokerCode: typeof code === 'string' && code ? code : null,
   });
 
 const cleanBaseEnv = (env) => {
@@ -99,11 +109,54 @@ const bindingResolvers = Object.freeze({
   },
 });
 
-export const authenticatedClisForEnv = ({ installed = [], env = {} } = {}) =>
-  installed.filter((cli) => {
+// Which installed CLIs can actually run this invocation. Derived from the
+// providers the broker RESOLVED, not from the presence of a secret environment
+// variable: a Bedrock role binding sets temporary AWS credentials and no bearer
+// token, so an env probe would exclude exactly the CLIs role mode enables
+// (specs/bedrock-iam-role-credential-mode: req-credential-delivery-env).
+export const authenticatedClisForProviders = ({ installed = [], resolvedProviders = [] } = {}) => {
+  const resolved = new Set(resolvedProviders);
+  return installed.filter((cli) => {
     const provider = credentialProviderForCli(cli);
-    return provider && Boolean(env[credentialEnvName(provider)]);
+    return Boolean(provider) && resolved.has(provider);
   });
+};
+
+// Apply ONE authorized broker entry to the invocation environment. Returns
+// whether the provider is usable for this invocation. Branches on the explicit
+// `kind` discriminator only — an entry whose shape must be guessed is treated as
+// missing, so the stage fails rather than invoking with no credential
+// (dec-explicit-discriminator, req-execution-role-no-bedrock).
+const applyAuthorizedCredential = ({ entry, binding, invocationEnv, authMode }) => {
+  if (!entry) return false;
+  if (entry.kind === CREDENTIAL_VALUE_KINDS.ROLE) {
+    // req-capabilities-authed: a capabilities request asks whether the binding is
+    // usable, and the broker deliberately mints nothing to answer it. No
+    // credential reaches the environment on this path.
+    if (authMode === AGENT_AUTH_MODES.CAPABILITIES) return entry.usable === true;
+    const credentials = entry.credentials;
+    if (!credentials?.AccessKeyId || !credentials?.SecretAccessKey || !credentials?.SessionToken) {
+      return false;
+    }
+    invocationEnv.AWS_ACCESS_KEY_ID = credentials.AccessKeyId;
+    invocationEnv.AWS_SECRET_ACCESS_KEY = credentials.SecretAccessKey;
+    invocationEnv.AWS_SESSION_TOKEN = credentials.SessionToken;
+    // AWS_BEARER_TOKEN_BEDROCK stays unset. cleanBaseEnv already scrubbed it, and
+    // con-one-binding-per-provider means a provider resolves to exactly one
+    // binding, so the two credential shapes never coexist.
+    return true;
+  }
+  if (entry.kind === CREDENTIAL_VALUE_KINDS.BEARER) {
+    if (!entry.value) return false;
+    invocationEnv[credentialEnvName(binding.provider)] = entry.value;
+    return true;
+  }
+  // kind null means nothing is configured at the bound path. An UNKNOWN kind is
+  // also missing: during the deploy window in which a newer container can meet an
+  // older broker, that surfaces as a legible credential_resolution_failed and a
+  // stage retry rather than a silent unauthenticated run.
+  return false;
+};
 
 export const resolveInvocationAgentAuth = async ({
   payload = {},
@@ -149,6 +202,10 @@ export const resolveInvocationAgentAuth = async ({
     action: 'resolve-agent-credentials',
     grant: payload.agentCredentialGrant,
   });
+  // The broker refuses with { ok: false, code } and mints nothing. That is a
+  // resolution failure, not a grant mismatch: distinguishing them is what makes
+  // the stage reason legible (req-expiry-failure-legible).
+  if (brokerResult?.ok === false) throw resolutionFailed(brokerResult.code);
   if (
     brokerResult.purpose !== authMode ||
     (brokerResult.projectId ?? null) !== projectId ||
@@ -163,7 +220,10 @@ export const resolveInvocationAgentAuth = async ({
       const binding = normalizeCredentialBinding(credential?.binding);
       authorized.set(bindingKey(binding), {
         binding,
+        kind: credential?.kind ?? null,
         value: typeof credential?.value === 'string' ? credential.value : '',
+        credentials: credential?.credentials ?? null,
+        usable: credential?.usable === true,
       });
     }
   } catch {
@@ -187,13 +247,17 @@ export const resolveInvocationAgentAuth = async ({
       source: binding.source,
     };
     credentialBindings.push(credentialBinding);
-    const value = authorized.get(bindingKey(binding))?.value || '';
-    if (!value) {
+    const usable = applyAuthorizedCredential({
+      entry: authorized.get(bindingKey(binding)),
+      binding,
+      invocationEnv,
+      authMode,
+    });
+    if (!usable) {
       missingProviders.push(binding.provider);
       missingCredentialBindings.push(credentialBinding);
       continue;
     }
-    invocationEnv[credentialEnvName(binding.provider)] = value;
     resolvedProviders.push(binding.provider);
   }
 

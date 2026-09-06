@@ -19,6 +19,29 @@
 // The MCP server name we register under in mcp-config (see stage-materializer).
 export const MCP_SERVER_NAME = 'aidlc';
 
+// Bedrock temporary credentials, forwarded to a CLI when the resolved binding is
+// an IAM role rather than a bearer token
+// (specs/bedrock-iam-role-credential-mode: req-credential-delivery-env).
+//
+// Nothing here is per-CLI: all three Bedrock CLIs use AWS SDKs and read the
+// standard credential variables, verified at the pinned versions
+// (con-cli-env-creds). No helper binary, no credential_process, no config file —
+// which is also what keeps a future non-AWS provider from needing its own wiring.
+//
+// A bearer token, when present, wins: con-one-binding-per-provider means one
+// provider resolves to exactly ONE binding, so the two shapes never coexist in
+// practice, and preferring the pre-existing path keeps the bearer behaviour
+// byte-identical to before this feature.
+const bedrockRoleEnv = (env) => {
+  if (env.AWS_BEARER_TOKEN_BEDROCK) return {};
+  if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY || !env.AWS_SESSION_TOKEN) return {};
+  return {
+    AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+    AWS_SESSION_TOKEN: env.AWS_SESSION_TOKEN,
+  };
+};
+
 // ── Claude Code (headless) ──
 // `claude -p --mcp-config <file> --permission-mode bypassPermissions
 //  --model <id> --output-format stream-json --verbose` — prompt piped on STDIN.
@@ -75,7 +98,7 @@ const claudeDriver = {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     };
     if (env.AWS_BEARER_TOKEN_BEDROCK) out.AWS_BEARER_TOKEN_BEDROCK = env.AWS_BEARER_TOKEN_BEDROCK;
-    return out;
+    return { ...out, ...bedrockRoleEnv(env) };
   },
 };
 
@@ -162,7 +185,7 @@ const opencodeDriver = {
     if (env.AWS_BEARER_TOKEN_BEDROCK) {
       out.AWS_BEARER_TOKEN_BEDROCK = env.AWS_BEARER_TOKEN_BEDROCK;
     }
-    return out;
+    return { ...out, ...bedrockRoleEnv(env) };
   },
 };
 
@@ -227,7 +250,7 @@ const codexDriver = {
   envForAuth(env) {
     const out = { AWS_REGION: env.BEDROCK_REGION || env.AWS_REGION || 'us-east-1' };
     if (env.AWS_BEARER_TOKEN_BEDROCK) out.AWS_BEARER_TOKEN_BEDROCK = env.AWS_BEARER_TOKEN_BEDROCK;
-    return out;
+    return { ...out, ...bedrockRoleEnv(env) };
   },
 };
 

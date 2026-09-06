@@ -11,6 +11,7 @@ import {
   buildStagePrompt,
   renderUnitScope,
   buildMcpConfig,
+  CUSTOM_MCP_AUTH_ENV_SCRUB,
   buildKiroAgentConfig,
   materializeKiroAgent,
   KIRO_AGENT_NAME,
@@ -254,7 +255,7 @@ describe('buildMcpConfig', () => {
     expect(cfg.mcpServers.fetch).toEqual({
       command: 'uvx',
       args: ['mcp-server-fetch'],
-      env: { AWS_BEARER_TOKEN_BEDROCK: '', KIRO_API_KEY: '' },
+      env: CUSTOM_MCP_AUTH_ENV_SCRUB,
     });
     expect(cfg.mcpServers.aidlc.command).toBe('node');
   });
@@ -296,6 +297,37 @@ describe('buildMcpConfig', () => {
     // The runtime-owned bridge is trusted and receives only its scoped env.
     expect(cfg.mcpServers.aidlc.env.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined();
     expect(cfg.mcpServers.aidlc.env.KIRO_API_KEY).toBeUndefined();
+  });
+
+  // specs/bedrock-iam-role-credential-mode — req-credential-safety,
+  // con-custom-server-excluded. Under role mode the CLI process env carries LIVE
+  // temporary Bedrock credentials where the bearer token never went, so a custom
+  // stdio child would inherit them from the parent unless they are blanked here.
+  it("prevents custom stdio servers from inheriting the role path's AWS credentials", () => {
+    const parentEnv = {
+      AWS_ACCESS_KEY_ID: 'ASIAEXAMPLE',
+      AWS_SECRET_ACCESS_KEY: 'live-secret',
+      AWS_SESSION_TOKEN: 'live-session',
+    };
+    const cfg = buildMcpConfig({
+      mcpEntry: 'x',
+      scope: { executionId: 'e', intentId: 'i' },
+      customServers: {
+        passive: { command: 'node', args: ['passive.js'] },
+        hostile: {
+          command: 'node',
+          args: ['hostile.js'],
+          env: { AWS_ACCESS_KEY_ID: 'try-to-restore-it' },
+        },
+      },
+    });
+
+    for (const name of ['passive', 'hostile']) {
+      const observedChildEnv = { ...parentEnv, ...cfg.mcpServers[name].env };
+      expect(observedChildEnv.AWS_ACCESS_KEY_ID).toBe('');
+      expect(observedChildEnv.AWS_SECRET_ACCESS_KEY).toBe('');
+      expect(observedChildEnv.AWS_SESSION_TOKEN).toBe('');
+    }
   });
 
   it('never lets a custom server override the reserved aidlc entry', () => {
@@ -382,7 +414,7 @@ describe('materializeStage (workspace write)', () => {
     expect(cfg.mcpServers.fetch).toEqual({
       command: 'uvx',
       args: ['mcp-server-fetch'],
-      env: { AWS_BEARER_TOKEN_BEDROCK: '', KIRO_API_KEY: '' },
+      env: CUSTOM_MCP_AUTH_ENV_SCRUB,
     });
     expect(cfg.mcpServers.aidlc.command).toBe('node');
     // Custom rules go into the CLI's NATIVE rules dir (auto-loaded), NOT the prompt.
@@ -477,7 +509,7 @@ describe('buildKiroAgentConfig', () => {
     expect(cfg.mcpServers.git).toEqual({
       command: 'uvx',
       args: ['mcp-server-git'],
-      env: { AWS_BEARER_TOKEN_BEDROCK: '', KIRO_API_KEY: '' },
+      env: CUSTOM_MCP_AUTH_ENV_SCRUB,
     });
     expect(cfg.mcpServers.aidlc.command).toBe('node');
   });
@@ -525,8 +557,7 @@ describe('OpenCode inline config', () => {
       environment: {
         API_KEY: '{env:LOCAL_KEY}',
         MIXED: 'Bearer {env:LOCAL_KEY}',
-        AWS_BEARER_TOKEN_BEDROCK: '',
-        KIRO_API_KEY: '',
+        ...CUSTOM_MCP_AUTH_ENV_SCRUB,
       },
     });
     expect(cfg.mcp.remote).toEqual({
@@ -633,14 +664,19 @@ describe('Codex config (per-stage CODEX_HOME)', () => {
     expect(aidlcSection).toContain('"AWS_CONTAINER_CREDENTIALS_FULL_URI"');
     expect(toml).not.toContain('AKIALOCAL');
     expect(toml).not.toContain('secretlocal');
-    // The custom server never gets the credential whitelist.
+    // The custom server never gets the credential whitelist (con-custom-server-
+    // excluded). Under role mode the parent CLI process env carries LIVE Bedrock
+    // credentials, so a custom child must not merely be un-forwarded — the three
+    // AWS names are explicitly blanked so it cannot inherit them either.
     const customSection = toml.slice(
       toml.indexOf('[mcp_servers."custom"]'),
       toml.indexOf('[mcp_servers."aidlc"]'),
     );
     expect(customSection).toContain('"FOO" = "bar"');
-    expect(customSection).not.toContain('AWS_ACCESS_KEY_ID');
     expect(customSection).not.toContain('env_vars');
+    for (const name of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']) {
+      expect(customSection).toContain(`"${name}" = ""`);
+    }
   });
 
   it('emits the reserved aidlc server LAST so a custom entry can never shadow it', () => {

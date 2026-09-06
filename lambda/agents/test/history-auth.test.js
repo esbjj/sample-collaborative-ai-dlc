@@ -4,6 +4,7 @@ import gremlin from 'gremlin';
 import { PartitionStrategy } from 'gremlin/lib/process/traversal-strategy.js';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
@@ -14,6 +15,7 @@ const PARTITION = `t-${randomUUID()}`;
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const lambdaMock = mockClient(LambdaClient);
 const agentcoreMock = mockClient(BedrockAgentCoreClient);
+const ssmMock = mockClient(SSMClient);
 let credentialMetadataHandler;
 
 let handler;
@@ -53,6 +55,8 @@ beforeEach(async () => {
   ddbMock.reset();
   lambdaMock.reset();
   agentcoreMock.reset();
+  ssmMock.reset();
+  ssmMock.on(PutParameterCommand).resolves({});
   credentialMetadataHandler = () => ({
     ok: true,
     bindings: {
@@ -332,5 +336,65 @@ describe('direct agent history authorization', () => {
     );
     expect(allowed.statusCode).toBe(200);
     expect(JSON.parse(allowed.body)).toMatchObject({ status: 'FAILED' });
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-role-credential-mode,
+// req-single-parameter-encoding. The space scope is where a role binding is
+// actually expected to be set, so its write path needs the same validation the
+// user and platform paths have. This uses the real membership graph because the
+// endpoint is gated on an owner/admin role.
+describe('space agent credentials write validation', () => {
+  const putEvent = (projectId, sub, body) => ({
+    httpMethod: 'PUT',
+    path: `/projects/${projectId}/agent-credentials`,
+    pathParameters: { projectId },
+    body: JSON.stringify(body),
+    requestContext: { authorizer: { claims: { sub } } },
+  });
+
+  it('accepts a valid role binding from a space owner', async () => {
+    const member = `u-${randomUUID()}`;
+    const { projectId } = await seedProject(member);
+    const roleArn = 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference';
+
+    const response = await handler(
+      putEvent(projectId, member, { bedrockBearerToken: JSON.stringify({ roleArn }) }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    const written = ssmMock.commandCalls(PutParameterCommand)[0].args[0].input;
+    expect(written.Name).toBe(
+      `/collab/dev/projects/${projectId}/agent-credentials/bedrock-bearer-token`,
+    );
+    expect(written.Type).toBe('SecureString');
+    expect(JSON.parse(written.Value).roleArn).toBe(roleArn);
+  });
+
+  it('rejects a malformed role binding at space scope without writing SSM', async () => {
+    const member = `u-${randomUUID()}`;
+    const { projectId } = await seedProject(member);
+
+    const response = await handler(
+      putEvent(projectId, member, { bedrockBearerToken: '{"roleArn":"not-an-arn"}' }),
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).code).toBe('BEDROCK_ROLE_BINDING_INVALID');
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('still accepts a bearer token at space scope', async () => {
+    const member = `u-${randomUUID()}`;
+    const { projectId } = await seedProject(member);
+
+    const response = await handler(
+      putEvent(projectId, member, { bedrockBearerToken: 'ABSKQmVkcm9jaw==' }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(ssmMock.commandCalls(PutParameterCommand)[0].args[0].input.Value).toBe(
+      'ABSKQmVkcm9jaw==',
+    );
   });
 });

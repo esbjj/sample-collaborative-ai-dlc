@@ -38,7 +38,7 @@ import {
   parseKiroCreditRate,
 } from '../cli/drivers.js';
 import { runChild, captureChild } from '../cli/spawn.js';
-import { isCredentialFailure } from '../cli/credential-errors.js';
+import { isCredentialFailure, isExpiredCredentialFailure } from '../cli/credential-errors.js';
 import {
   materializeMcpConfig as defaultMaterializeMcpConfig,
   materializeKiroAgent as defaultMaterializeKiroAgent,
@@ -2375,6 +2375,18 @@ export const runStage = async (
           summary: `Kiro exited ${exitCode} with an empty final message after completing work; treated as success (ACP empty-completion).`,
         })
         .catch(() => {});
+    } else if (isExpiredCredentialFailure(result?.stderrTail)) {
+      // req-expiry-failure-legible: distinct from credential_invalid because the
+      // binding is fine and a retry resolves a fresh credential through the
+      // normal invocation path. Distinguishable in logs from a dead container
+      // (stage_callback_failed) and from a genuine agent failure
+      // (cli_nonzero_exit). NOTE: a retry re-runs the WHOLE stage attempt, so
+      // work done before the expiry is lost.
+      return fail(
+        stageInstanceId,
+        'credential_expired',
+        'The temporary credential for this stage expired before the stage finished; the retry resolves a fresh one',
+      );
     } else if (isCredentialFailure(result?.stderrTail)) {
       const detail =
         credentialFailureDetail({

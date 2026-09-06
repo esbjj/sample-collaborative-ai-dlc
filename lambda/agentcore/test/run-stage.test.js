@@ -884,6 +884,35 @@ describe('runStage — failure paths (always records terminal state)', () => {
     },
   );
 
+  // specs/bedrock-iam-role-credential-mode — req-execution-role-no-bedrock:
+  // "WHEN credential resolution produces nothing THEN the system SHALL fail the
+  // stage rather than invoke successfully". This matters more under role mode than
+  // under bearer: per con-mmds-chain-live the container's AWS credential chain
+  // reaches the execution role and stays live, so if a stage ran anyway the CLI
+  // would attempt Bedrock under the EXECUTION role identity. Fail-closed rests on
+  // two things holding together — this early return, and the execution role policy
+  // holding no bedrock action (asserted in execution-role-iam.test.js).
+  it('fails the stage without spawning any CLI when Bedrock resolution produced nothing', async () => {
+    const spawns = [];
+    const deps = baseDeps({
+      // What the resolver reports when the broker returned a role entry with no
+      // credentials, or refused outright.
+      availableClis: [],
+      missingCredentialBindings: [{ provider: 'bedrock', source: 'platform' }],
+      spawnFn: (command, args) => {
+        spawns.push({ command, args });
+        return okSpawn(command, args);
+      },
+    });
+
+    const res = await runStage({ ...baseArgs, requestedCli: 'claude' }, deps);
+
+    expect(res).toMatchObject({ ok: false, reason: 'credential_unavailable' });
+    expect(res.detail).toContain('The Platform Bedrock credential pinned to this run');
+    // The decisive assertion: no agent process was started at all.
+    expect(spawns).toEqual([]);
+  });
+
   it('fails when the workflow is not found', async () => {
     const deps = baseDeps({ loadLibrary: async () => ({ workflow: null, library: null }) });
     const res = await runStage(baseArgs, deps);
@@ -1586,6 +1615,40 @@ describe('runStage — fresh run persists the CLI session + parks on a pending g
       ([operation, input]) => operation === 'appendEvent' && input.type === 'v2.stage.failed',
     );
     expect(failedEvent?.[1].summary).not.toContain('secret');
+  });
+
+  // specs/bedrock-iam-role-credential-mode — req-expiry-failure-legible. v1 ships
+  // no refresh, so a stage outliving its 3600s role credential must report its OWN
+  // reason: the binding is fine and the retry resolves a fresh credential, unlike
+  // credential_invalid which needs an operator to rotate the secret.
+  it('reports an expired temporary credential as credential_expired, not credential_invalid', async () => {
+    const deps = baseDeps({
+      spawnFn: () => ({
+        on: (ev, cb) => ev === 'close' && setImmediate(() => cb(1)),
+        stdin: { end() {} },
+        stderr: {
+          on: (ev, cb) => {
+            if (ev === 'data') {
+              cb(
+                Buffer.from(
+                  'ExpiredTokenException: The security token included in the request is expired',
+                ),
+              );
+            }
+          },
+        },
+      }),
+    });
+    const res = await runStage(baseArgs, deps);
+    expect(res).toMatchObject({ ok: false, reason: 'credential_expired' });
+    expect(res.detail).toContain('expired before the stage finished');
+    // Distinguishable from a genuine agent failure and from a rejected secret.
+    expect(res.reason).not.toBe('cli_nonzero_exit');
+    expect(res.reason).not.toBe('credential_invalid');
+    const failedEvent = deps.store.calls.find(
+      ([operation, input]) => operation === 'appendEvent' && input.type === 'v2.stage.failed',
+    );
+    expect(failedEvent?.[1].summary).not.toContain('security token');
   });
 
   it('treats a Kiro empty-final-completion crash as success (work already done)', async () => {
