@@ -111,7 +111,16 @@ export const dispatchInvocation = async ({
     // instead of turning the response into an SDK transport exception.
     return { statusCode: 200, body: { ...result, command, at: now() } };
   } catch (e) {
-    return { statusCode: 500, body: { error: e.message, command } };
+    // A coded error carries its code through as `reason`, which is the field the
+    // orchestrator reads when a dispatch is refused. Without this, a credential
+    // resolution failure arrives as the generic stage_dispatch_failed and is
+    // indistinguishable from an old container or a duplicate job
+    // (specs/bedrock-iam-role-credential-mode: req-expiry-failure-legible).
+    // Only the code travels — never provider or STS error text.
+    return {
+      statusCode: 500,
+      body: { error: e.message, command, ...(e.code ? { reason: e.code } : {}) },
+    };
   } finally {
     busy?.leave();
   }
