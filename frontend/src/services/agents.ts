@@ -71,6 +71,33 @@ export type AgentCredentialSource = 'user' | 'space' | 'platform';
 export interface AgentCredentialStatus {
   bedrockBearerTokenSet: boolean;
   kiroApiKeySet: boolean;
+  /** How the Bedrock binding is configured: an IAM role, a bearer token, or
+   *  nothing. `bedrockBearerTokenSet` deliberately keeps its narrower meaning —
+   *  a BEARER secret is set — so a role-only scope reads false there and `role`
+   *  here (specs/bedrock-iam-role-credential-mode: req-configured-semantics). */
+  bedrockMode?: BedrockCredentialMode;
+  /** Present only on a read gated to a principal who may modify the binding. */
+  bedrockRoleArn?: string | null;
+  bedrockExternalIdSet?: boolean;
+  /** The platform-generated external ID. Non-secret but tenant-identifying, so it
+   *  is returned only on a gated read (dec-external-id-not-secret). */
+  bedrockExternalId?: string | null;
+}
+
+export type BedrockCredentialMode = 'bearer' | 'role' | null;
+
+/** The verdict of the bind-time AssumeRole check (req-binding-preflight). It is an
+ *  input check, not a security control: resolution re-checks every stage. */
+export interface BedrockPreflightFailure {
+  cause: string;
+  sessionName?: string | null;
+  candidates?: { candidate: string; detail: string }[];
+}
+
+export interface AgentCredentialSaveResult {
+  saved: boolean;
+  bedrockRoleArn?: string | null;
+  bedrockExternalId?: string | null;
 }
 
 export interface SpaceAgentCredentialStatus extends AgentCredentialStatus {
@@ -93,6 +120,12 @@ export interface AgentSettings {
   bedrockBearerTokenSet: boolean;
   /** True when a Kiro API key is stored in SSM */
   kiroApiKeySet: boolean;
+  /** Bedrock binding mode; see AgentCredentialStatus. */
+  bedrockMode?: BedrockCredentialMode;
+  /** Both present only for a platform admin, who may also overwrite the binding. */
+  bedrockRoleArn?: string | null;
+  bedrockExternalIdSet?: boolean;
+  bedrockExternalId?: string | null;
   /** Default runtime model overrides by supported CLI */
   cliModels?: CliModels;
   /** Agent tier → model configuration: judgment/balanced/templated rows plus
@@ -198,7 +231,7 @@ export const agentsService = {
     return api.get('/agents/settings');
   },
 
-  async updateSettings(update: AgentSettingsUpdate): Promise<{ saved: boolean }> {
+  async updateSettings(update: AgentSettingsUpdate): Promise<AgentCredentialSaveResult> {
     return api.put('/agents/settings', update);
   },
 
@@ -208,7 +241,7 @@ export const agentsService = {
 
   async updatePersonalCredentials(
     update: Pick<AgentSettingsUpdate, 'bedrockBearerToken' | 'kiroApiKey'>,
-  ): Promise<{ saved: boolean }> {
+  ): Promise<AgentCredentialSaveResult> {
     return api.put('/users/me/agent-credentials', update);
   },
 
@@ -219,7 +252,7 @@ export const agentsService = {
   async updateProjectCredentials(
     projectId: string,
     update: Pick<AgentSettingsUpdate, 'bedrockBearerToken' | 'kiroApiKey'>,
-  ): Promise<{ saved: boolean }> {
+  ): Promise<AgentCredentialSaveResult> {
     return api.put(`/projects/${projectId}/agent-credentials`, update);
   },
 

@@ -187,3 +187,114 @@ describe('AgentCredentialScopeCard', () => {
     expect(getPersonalCredentials).toHaveBeenCalledTimes(2);
   });
 });
+
+// specs/bedrock-iam-role-credential-mode — req-configured-semantics,
+// req-bearer-deprecated, req-external-id-lifecycle, req-binding-preflight.
+describe('AgentCredentialScopeCard bedrock role mode', () => {
+  const ROLE_ARN = 'arn:aws:iam::444455556666:role/aidlc-bedrock-inference';
+
+  it('reports a role-only scope as configured, with no secret stored', async () => {
+    // The load-bearing case: this scope has NO bedrock secret at all, so a card
+    // deriving "configured" from a secret would render it as having no credentials.
+    getProjectCredentials.mockResolvedValue({
+      bedrockBearerTokenSet: false,
+      kiroApiKeySet: false,
+      bedrockMode: 'role',
+      bedrockRoleArn: ROLE_ARN,
+      bedrockExternalIdSet: false,
+      platformFallback: { bedrockBearerTokenSet: false, kiroApiKeySet: false },
+    });
+
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+
+    expect(await screen.findByText('1 provider configured')).toBeInTheDocument();
+    expect(screen.getByText(ROLE_ARN)).toBeInTheDocument();
+    expect(screen.getByText('Recommended')).toBeInTheDocument();
+    // And the bearer field is present but marked deprecated, not removed: existing
+    // bearer deployments keep working.
+    expect(screen.getByLabelText(/Bedrock Bearer Token \(deprecated\)/)).toBeInTheDocument();
+  });
+
+  it('sends only the role ARN, never an external ID', async () => {
+    const user = userEvent.setup();
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+
+    await user.type(await screen.findByLabelText(/Bedrock IAM Role/), ROLE_ARN);
+    await user.click(screen.getByRole('button', { name: 'Save Credentials' }));
+
+    // The role travels in the same field as a bearer token — which shape the value
+    // holds is a property of the value. The external ID is the server's to generate.
+    await waitFor(() =>
+      expect(updateProjectCredentials).toHaveBeenCalledWith('p-1', {
+        bedrockBearerToken: JSON.stringify({ roleArn: ROLE_ARN }),
+      }),
+    );
+  });
+
+  it('shows a returned external ID masked, with an explicit reveal', async () => {
+    const user = userEvent.setup();
+    updateProjectCredentials.mockResolvedValue({
+      saved: true,
+      bedrockRoleArn: ROLE_ARN,
+      bedrockExternalId: 'generated-external-id',
+    });
+
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+    await user.type(await screen.findByLabelText(/Bedrock IAM Role/), ROLE_ARN);
+    await user.click(screen.getByRole('button', { name: 'Save Credentials' }));
+
+    const value = await screen.findByTestId('space-bedrock-external-id-value');
+    // Masked by default — presentation hygiene, not a security control, since AWS
+    // states the value is not a secret.
+    expect(value).not.toHaveTextContent('generated-external-id');
+    await user.click(screen.getByRole('button', { name: /Reveal External ID/ }));
+    expect(await screen.findByText('generated-external-id')).toBeInTheDocument();
+  });
+
+  it('keeps the external ID visible when the preflight rejects the save', async () => {
+    const user = userEvent.setup();
+    const { ApiError } = await import('@/services/api');
+    updateProjectCredentials.mockRejectedValue(
+      new ApiError(400, 'The Bedrock role could not be assumed with this binding', {
+        code: 'BEDROCK_ROLE_PREFLIGHT_FAILED',
+        preflight: {
+          cause: 'trust-policy-rejected',
+          candidates: [{ candidate: 'principal-not-trusted', detail: 'Trust the broker role.' }],
+        },
+        bedrockExternalId: 'value-to-paste',
+      }),
+    );
+
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+    await user.type(await screen.findByLabelText(/Bedrock IAM Role/), ROLE_ARN);
+    await user.click(screen.getByRole('button', { name: 'Save Credentials' }));
+
+    // This is the bootstrap: the operator cannot write the trust policy the
+    // preflight is checking until they have the value, so a rejection must surface
+    // both the reason and the value.
+    expect(await screen.findByText(/trust-policy-rejected/)).toBeInTheDocument();
+    expect(screen.getByText('Trust the broker role.')).toBeInTheDocument();
+    expect(screen.getByTestId('space-bedrock-external-id-value')).toBeInTheDocument();
+  });
+
+  it('refuses a role ARN and a bearer token in the same save', async () => {
+    const user = userEvent.setup();
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+
+    await user.type(await screen.findByLabelText(/Bedrock IAM Role/), ROLE_ARN);
+    await user.type(screen.getByLabelText(/Bedrock Bearer Token/), 'a-bearer-token');
+
+    // A scope holds ONE bedrock binding, so this is ambiguous rather than additive.
+    expect(screen.getByRole('button', { name: 'Save Credentials' })).toBeDisabled();
+    expect(updateProjectCredentials).not.toHaveBeenCalled();
+  });
+
+  it('offers no role field at personal scope', async () => {
+    render(<AgentCredentialScopeCard scope="personal" />);
+    await screen.findByLabelText(/Bedrock Bearer Token/);
+    // That endpoint is gated only on authentication, so any member could otherwise
+    // name a role ARN (dec-user-scope-role-deferred).
+    expect(screen.queryByLabelText(/Bedrock IAM Role/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/deprecated/)).not.toBeInTheDocument();
+  });
+});
