@@ -11,6 +11,9 @@ export const AGENT_CREDENTIAL_SOURCES = ['user', 'space', 'platform'];
 export const AGENT_CREDENTIAL_METADATA_ACTIONS = Object.freeze({
   READ_SCOPE_STATUS: 'read-agent-credential-scope-status',
   RESOLVE_EFFECTIVE_BINDINGS: 'resolve-effective-agent-credential-bindings',
+  // Bind-time input check for a Bedrock role binding (req-binding-preflight).
+  // Returns a verdict, never credentials.
+  PREFLIGHT_BEDROCK_ROLE: 'preflight-bedrock-role-binding',
 });
 
 export const AGENT_CLI_PROVIDER = {
@@ -111,6 +114,7 @@ const EXTERNAL_ID_MIN_LENGTH = 2;
 const EXTERNAL_ID_MAX_LENGTH = 1224;
 
 export const BEDROCK_ROLE_BINDING_INVALID = 'BEDROCK_ROLE_BINDING_INVALID';
+export const BEDROCK_EXTERNAL_ID_NOT_ACCEPTED = 'BEDROCK_EXTERNAL_ID_NOT_ACCEPTED';
 
 const invalidRoleBinding = (message) =>
   Object.assign(new Error(message), { code: BEDROCK_ROLE_BINDING_INVALID });
@@ -244,6 +248,132 @@ export const EXTERNAL_ID_ENTROPY_BYTES = 32;
 export const generateExternalId = (randomBytes = defaultRandomBytes) =>
   randomBytes(EXTERNAL_ID_ENTROPY_BYTES).toString('base64url');
 
+// ── Where the external ID lives, and why it is not only inside the binding ──
+//
+// dec-external-id-storage. The bootstrap order in req-same-and-cross-account is
+// generate → surface → operator writes the trust policy → save → preflight, and
+// req-binding-preflight forbids persisting a binding whose AssumeRole fails. A
+// cross-account binding therefore CANNOT be saved on the first attempt: the trust
+// policy cannot name an external ID nobody has seen yet.
+//
+// If the value existed only inside the binding, every rejected save would discard
+// it and the retry would generate a different one, so the operator's freshly
+// written trust policy would already be stale — the bootstrap would never
+// converge. The value is therefore kept in its own per-scope parameter, generated
+// idempotently, and COPIED into the binding when a save succeeds.
+//
+// The path is deliberately OUTSIDE `agent-credentials/`: the external ID is not a
+// credential (dec-external-id-not-secret), the broker's write-only discipline for
+// credential paths stays untouched, and the settings API can read its own value
+// back without gaining any read permission on credential material.
+export const bedrockExternalIdPath = ({ base, source, projectId = null }) => {
+  const prefix = normalizeBase(base);
+  if (!prefix) throw new Error('Agent credential store is not configured');
+  switch (assertSource(source)) {
+    case 'platform':
+      return `${prefix}/bedrock-external-id`;
+    case 'space':
+      return `${prefix}/projects/${assertIdentifier(projectId, 'projectId')}/bedrock-external-id`;
+    default:
+      // User scope has no role binding at all (dec-user-scope-role-deferred), so
+      // it can never need an external ID.
+      throw new Error(`Bedrock external IDs are not supported at ${source} scope`);
+  }
+};
+
+// The account that owns a role ARN. Returns null for anything unparseable rather
+// than throwing: callers use it to decide whether an external ID is needed, and a
+// malformed ARN is already rejected by parseRoleBindingValue.
+export const accountIdFromRoleArn = (roleArn) => {
+  const match = /^arn:aws[a-z-]*:iam::([0-9]{12}):role\//.exec(String(roleArn || ''));
+  return match ? match[1] : null;
+};
+
+// dec-external-id-scope: the confused-deputy problem is a THIRD-PARTY problem, so
+// an external ID is required cross-account and generated for nothing else. When
+// the platform account is unknown the answer is `true` — that direction fails
+// safe, since a superfluous external ID is inert unless the trust policy asks for
+// one, whereas a missing one is a hard AssumeRole denial.
+export const bedrockRoleIsCrossAccount = ({ roleArn, platformAccountId }) => {
+  const roleAccount = accountIdFromRoleArn(roleArn);
+  if (!roleAccount) return false;
+  if (!platformAccountId) return true;
+  return roleAccount !== String(platformAccountId);
+};
+
+export const readBedrockExternalId = async (ssm, { base, source, projectId = null }) => {
+  const path = bedrockExternalIdPath({ base, source, projectId });
+  try {
+    const result = await ssm.send(new GetParameterCommand({ Name: path, WithDecryption: true }));
+    const value = String(result.Parameter?.Value || '').trim();
+    return value || null;
+  } catch (error) {
+    if (error?.name === 'ParameterNotFound') return null;
+    throw error;
+  }
+};
+
+// Idempotent: the FIRST call generates and stores, every later call returns the
+// same value. Idempotency is the whole point — req-external-id-lifecycle requires
+// the value be re-readable rather than shown once, and a stable value is what lets
+// a rejected save be retried against a trust policy the operator has already
+// written.
+export const ensureBedrockExternalId = async (
+  ssm,
+  { base, source, projectId = null, randomBytes = defaultRandomBytes },
+) => {
+  const existing = await readBedrockExternalId(ssm, { base, source, projectId });
+  if (existing) return existing;
+  const externalId = generateExternalId(randomBytes);
+  await ssm.send(
+    new PutParameterCommand({
+      Name: bedrockExternalIdPath({ base, source, projectId }),
+      Value: externalId,
+      Type: 'SecureString',
+      Overwrite: true,
+    }),
+  );
+  return externalId;
+};
+
+// Compose the value that is actually STORED for a Bedrock binding write.
+//
+// The client sends a role ARN and never an external ID (req-external-id-lifecycle
+// forbids accepting one, and validateCredentialScopeUpdate rejects it). The server
+// decides whether the binding needs one and attaches its own value, so the stored
+// binding is always the canonical form the broker reads.
+//
+// Returns the update unchanged for a bearer token or a cleared value, so a
+// bearer-configured deployment is untouched.
+export const prepareBedrockBindingWrite = async (
+  ssm,
+  { base, source, projectId = null, update = {}, platformAccountId = null, randomBytes },
+) => {
+  const value = update?.bedrockBearerToken;
+  if (typeof value !== 'string' || !looksLikeRoleBindingValue(value)) {
+    return { update, roleArn: null, externalId: null, crossAccount: false };
+  }
+  const { roleArn } = parseRoleBindingValue(value);
+  const crossAccount = bedrockRoleIsCrossAccount({ roleArn, platformAccountId });
+  const externalId = crossAccount
+    ? await ensureBedrockExternalId(ssm, {
+        base,
+        source,
+        projectId,
+        ...(randomBytes ? { randomBytes } : {}),
+      })
+    : null;
+  return {
+    update: {
+      ...update,
+      bedrockBearerToken: JSON.stringify({ roleArn, ...(externalId ? { externalId } : {}) }),
+    },
+    roleArn,
+    externalId,
+    crossAccount,
+  };
+};
+
 // Validate a credential-scope write BEFORE it reaches SSM.
 //
 // specs/bedrock-iam-role-credential-mode: req-single-parameter-encoding puts
@@ -273,7 +403,6 @@ export const validateCredentialScopeUpdate = ({ source, update = {} }) => {
   }
   try {
     parseRoleBindingValue(value);
-    return null;
   } catch (error) {
     // The message names the offending field and never echoes the value.
     return {
@@ -281,6 +410,30 @@ export const validateCredentialScopeUpdate = ({ source, update = {} }) => {
       code: error.code || BEDROCK_ROLE_BINDING_INVALID,
       issues: [error.message],
     };
+  }
+  // req-external-id-lifecycle: AWS requires the value be "generated by Example
+  // Corp and not their customers", i.e. controlled by the party doing the
+  // assuming. Accepting one here would also break per-binding uniqueness, so an
+  // operator-supplied value is refused outright rather than quietly replaced —
+  // silently overwriting it would leave them with a trust policy they believe is
+  // correct.
+  if (looksLikeClientSuppliedExternalId(value)) {
+    return {
+      error: 'A Bedrock external ID cannot be supplied by a client',
+      code: BEDROCK_EXTERNAL_ID_NOT_ACCEPTED,
+      issues: [
+        'The platform generates the external ID for a cross-account role binding and returns it for you to paste into the trust policy. Send only roleArn.',
+      ],
+    };
+  }
+  return null;
+};
+
+const looksLikeClientSuppliedExternalId = (value) => {
+  try {
+    return Boolean(parseRoleBindingValue(value).externalId);
+  } catch {
+    return false;
   }
 };
 
@@ -525,8 +678,11 @@ export const availableClisForBindings = ({ installed = [], bindings = {} } = {})
   });
 
 export default {
+  accountIdFromRoleArn,
   agentCredentialPath,
   availableClisForBindings,
+  bedrockExternalIdPath,
+  bedrockRoleIsCrossAccount,
   credentialEnvName,
   credentialProviderForCli,
   credentialSourcesFromBindings,
@@ -534,11 +690,14 @@ export default {
   credentialValueKindSafe,
   deleteCredentialScope,
   describeBedrockBinding,
+  ensureBedrockExternalId,
   generateExternalId,
   isConfiguredCredentialValue,
   looksLikeRoleBindingValue,
   normalizeCredentialBinding,
   parseRoleBindingValue,
+  prepareBedrockBindingWrite,
+  readBedrockExternalId,
   readCredentialBindingValue,
   readCredentialScopeStatus,
   resolveEffectiveCredentialBindings,

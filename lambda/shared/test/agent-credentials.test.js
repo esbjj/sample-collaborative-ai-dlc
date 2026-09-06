@@ -13,15 +13,20 @@ import {
   EXTERNAL_ID_ENTROPY_BYTES,
   agentCredentialPath,
   availableClisForBindings,
+  bedrockExternalIdPath,
+  bedrockRoleIsCrossAccount,
   credentialSourcesFromBindings,
   credentialValueKind,
   credentialValueKindSafe,
   deleteCredentialScope,
   describeBedrockBinding,
+  ensureBedrockExternalId,
   generateExternalId,
   isConfiguredCredentialValue,
   looksLikeRoleBindingValue,
   parseRoleBindingValue,
+  prepareBedrockBindingWrite,
+  readBedrockExternalId,
   readCredentialBindingValue,
   readCredentialScopeStatus,
   resolveEffectiveCredentialBindings,
@@ -452,17 +457,22 @@ describe('external ID generation', () => {
     expect(calls).toEqual([EXTERNAL_ID_ENTROPY_BYTES]);
   });
 
-  it('never generates a value the write-path validator would reject', () => {
-    // The real validator, not a copy of its regex: this is what guarantees a
-    // generated ID can always be stored. 200 draws exercises the alphabet,
-    // including the base64url characters that a stricter charset would refuse.
+  it('never generates a value the storage validator would reject', () => {
+    // The real parser the broker and the write path both run, not a copy of its
+    // regex: this is what guarantees a generated ID can always be stored and read
+    // back. 200 draws exercises the alphabet, including the base64url characters
+    // that a stricter charset would refuse.
+    //
+    // Asserted through parseRoleBindingValue rather than
+    // validateCredentialScopeUpdate, because that validator now REFUSES a
+    // client-supplied external ID outright (req-external-id-lifecycle) — the
+    // server attaches its own value after validation, so the parser is the gate a
+    // generated value must survive.
     for (let i = 0; i < 200; i += 1) {
       const externalId = generateExternalId();
-      const verdict = validateCredentialScopeUpdate({
-        source: 'platform',
-        update: { bedrockBearerToken: JSON.stringify({ roleArn: ROLE_ARN, externalId }) },
-      });
-      expect(verdict).toBe(null);
+      expect(
+        parseRoleBindingValue(JSON.stringify({ roleArn: ROLE_ARN, externalId })),
+      ).toStrictEqual({ roleArn: ROLE_ARN, externalId });
     }
   });
 
@@ -503,5 +513,172 @@ describe('describeBedrockBinding is total', () => {
         expect(described.mode).toBe('role');
       }
     }
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-external-id-lifecycle,
+// req-same-and-cross-account, dec-external-id-scope, dec-external-id-storage.
+//
+// The external ID lives in its own per-scope parameter and is COPIED into the
+// binding on a successful save. That indirection is what makes the cross-account
+// bootstrap converge: req-binding-preflight refuses to persist a binding whose
+// AssumeRole fails, so a value kept only inside the binding would be discarded by
+// the very first save and the retry would generate a different one, invalidating
+// the trust policy the operator had just written.
+describe('bedrock external ID storage and cross-account detection', () => {
+  const ssm = mockClient(SSMClient);
+  const BASE = '/collab/dev';
+  const SAME_ACCOUNT = 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference';
+  const OTHER_ACCOUNT = 'arn:aws:iam::444455556666:role/aidlc-bedrock-inference';
+  const PLATFORM_ACCOUNT = '111122223333';
+
+  beforeEach(() => {
+    ssm.reset();
+  });
+
+  it('keeps the external ID outside the credential paths', () => {
+    // The parameter must NOT sit under agent-credentials/, which is where the
+    // broker's exclusive-read discipline applies. Reading its own generated value
+    // back is how an operator recovers it, and that must not require the settings
+    // API to hold any read grant on credential material.
+    expect(bedrockExternalIdPath({ base: BASE, source: 'platform' })).toBe(
+      '/collab/dev/bedrock-external-id',
+    );
+    expect(bedrockExternalIdPath({ base: BASE, source: 'space', projectId: 'p-1' })).toBe(
+      '/collab/dev/projects/p-1/bedrock-external-id',
+    );
+    for (const path of [
+      bedrockExternalIdPath({ base: BASE, source: 'platform' }),
+      bedrockExternalIdPath({ base: BASE, source: 'space', projectId: 'p-1' }),
+    ]) {
+      expect(path).not.toContain('/agent-credentials/');
+    }
+    // User scope has no role binding at all, so it can never need one.
+    expect(() => bedrockExternalIdPath({ base: BASE, source: 'user', userId: 'u-1' })).toThrow();
+  });
+
+  it('treats an unknown platform account as cross-account, which is the fail-safe direction', () => {
+    expect(
+      bedrockRoleIsCrossAccount({ roleArn: SAME_ACCOUNT, platformAccountId: '111122223333' }),
+    ).toBe(false);
+    expect(
+      bedrockRoleIsCrossAccount({ roleArn: OTHER_ACCOUNT, platformAccountId: '111122223333' }),
+    ).toBe(true);
+    // A superfluous external ID is inert unless a trust policy asks for one; a
+    // missing one is a hard AssumeRole denial. So unknown must mean "generate".
+    expect(bedrockRoleIsCrossAccount({ roleArn: OTHER_ACCOUNT, platformAccountId: null })).toBe(
+      true,
+    );
+    expect(bedrockRoleIsCrossAccount({ roleArn: 'not-an-arn', platformAccountId: null })).toBe(
+      false,
+    );
+  });
+
+  it('generates once and returns the same value on every later call', async () => {
+    ssm
+      .on(GetParameterCommand)
+      .rejectsOnce(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }));
+    ssm.on(PutParameterCommand).resolves({});
+
+    const first = await ensureBedrockExternalId(ssm, { base: BASE, source: 'platform' });
+    expect(first).toMatch(/^[\w-]{20,}$/);
+    const written = ssm.commandCalls(PutParameterCommand)[0].args[0].input;
+    expect(written).toMatchObject({
+      Name: '/collab/dev/bedrock-external-id',
+      Value: first,
+      Type: 'SecureString',
+      Overwrite: true,
+    });
+
+    // Now that it exists, a second call must NOT mint a new one — recovering a
+    // lost value is a plain read, not a rotation (dec-external-id-not-secret).
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: first } });
+    expect(await ensureBedrockExternalId(ssm, { base: BASE, source: 'platform' })).toBe(first);
+    expect(ssm.commandCalls(PutParameterCommand)).toHaveLength(1);
+  });
+
+  it('reads an absent external ID as null rather than throwing', async () => {
+    ssm
+      .on(GetParameterCommand)
+      .rejects(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }));
+    expect(await readBedrockExternalId(ssm, { base: BASE, source: 'platform' })).toBe(null);
+  });
+
+  it('attaches no external ID to a same-account binding', async () => {
+    const prepared = await prepareBedrockBindingWrite(ssm, {
+      base: BASE,
+      source: 'platform',
+      update: { bedrockBearerToken: JSON.stringify({ roleArn: SAME_ACCOUNT }) },
+      platformAccountId: PLATFORM_ACCOUNT,
+    });
+    expect(prepared.crossAccount).toBe(false);
+    expect(prepared.externalId).toBe(null);
+    expect(JSON.parse(prepared.update.bedrockBearerToken)).toStrictEqual({ roleArn: SAME_ACCOUNT });
+    // An unused stored value invites confusion, so nothing is written at all.
+    expect(ssm.commandCalls(PutParameterCommand)).toHaveLength(0);
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(0);
+  });
+
+  it('attaches a generated external ID to a cross-account binding', async () => {
+    ssm
+      .on(GetParameterCommand)
+      .rejects(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }));
+    ssm.on(PutParameterCommand).resolves({});
+
+    const prepared = await prepareBedrockBindingWrite(ssm, {
+      base: BASE,
+      source: 'space',
+      projectId: 'p-1',
+      update: { bedrockBearerToken: JSON.stringify({ roleArn: OTHER_ACCOUNT }) },
+      platformAccountId: PLATFORM_ACCOUNT,
+    });
+
+    expect(prepared.crossAccount).toBe(true);
+    expect(prepared.externalId).toBeTruthy();
+    expect(JSON.parse(prepared.update.bedrockBearerToken)).toStrictEqual({
+      roleArn: OTHER_ACCOUNT,
+      externalId: prepared.externalId,
+    });
+    expect(ssm.commandCalls(PutParameterCommand)[0].args[0].input.Name).toBe(
+      '/collab/dev/projects/p-1/bedrock-external-id',
+    );
+  });
+
+  it('leaves a bearer token and a cleared value completely untouched', async () => {
+    for (const bedrockBearerToken of ['ABSKQmVkcm9jaw==', '', '   ']) {
+      const prepared = await prepareBedrockBindingWrite(ssm, {
+        base: BASE,
+        source: 'platform',
+        update: { bedrockBearerToken },
+        platformAccountId: PLATFORM_ACCOUNT,
+      });
+      expect(prepared.update.bedrockBearerToken).toBe(bedrockBearerToken);
+      expect(prepared.roleArn).toBe(null);
+    }
+    // No parameter is touched for a bearer deployment: this path must be inert
+    // for every pre-existing installation.
+    expect(ssm.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('refuses a client-supplied external ID instead of silently replacing it', () => {
+    // AWS requires the assuming party to control the value. Overwriting it
+    // quietly would leave the operator with a trust policy they believe is right.
+    const verdict = validateCredentialScopeUpdate({
+      source: 'platform',
+      update: {
+        bedrockBearerToken: JSON.stringify({
+          roleArn: OTHER_ACCOUNT,
+          externalId: 'operator-chose',
+        }),
+      },
+    });
+    expect(verdict).toMatchObject({ code: 'BEDROCK_EXTERNAL_ID_NOT_ACCEPTED' });
+    // A role ARN on its own is still accepted.
+    expect(
+      validateCredentialScopeUpdate({
+        source: 'platform',
+        update: { bedrockBearerToken: JSON.stringify({ roleArn: OTHER_ACCOUNT }) },
+      }),
+    ).toBe(null);
   });
 });
