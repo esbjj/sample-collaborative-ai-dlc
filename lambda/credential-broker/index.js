@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { SSMClient } from '@aws-sdk/client-ssm';
-import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
+import { STSClient } from '@aws-sdk/client-sts';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { executionMetaKey } from '../shared/v2-process-keys.js';
 import {
@@ -15,12 +15,16 @@ import {
 import { resolveBindingCredential } from '../shared/source-control-credentials.js';
 import { repoUrl, repoProvider } from '../shared/repo-provider.js';
 import {
-  BEDROCK_ROLE_BINDING_INVALID,
   CREDENTIAL_VALUE_KINDS,
   looksLikeRoleBindingValue,
   parseRoleBindingValue,
   readCredentialBindingValue,
 } from '../shared/agent-credentials.js';
+import {
+  BEDROCK_ROLE_ERROR_CODES,
+  ROLE_SESSION_DURATION_SECONDS,
+  assumeBedrockRole,
+} from '../shared/bedrock-role.js';
 import { verifyIssuedAgentCredentialGrant } from '../shared/agent-credential-grants.js';
 import { AGENT_AUTH_MODES } from '../shared/agent-command-registry.js';
 
@@ -41,105 +45,10 @@ const RESOLVE_AGENT_CREDENTIALS = 'resolve-agent-credentials';
 // resolver — which is why the AssumeRole happens HERE and never in a container.
 // The container never names a role: the ARN is read from SSM at resolution time,
 // keyed off the binding the verified grant authorizes.
-
-// con-role-chaining-3600: the broker itself runs under an assumed role, so this
-// AssumeRole is role chaining and STS caps it at exactly 3600s. This is a
-// ceiling, not a tuning knob, and is deliberately not configurable.
-const ROLE_SESSION_DURATION_SECONDS = 3600;
-// req-session-name-trust-condition: customers authorize on this format with an
-// sts:RoleSessionName trust-policy condition, so changing it is a BREAKING change
-// requiring a migration note. Composed in exactly one place, on the server.
-const ROLE_SESSION_NAME_PREFIX = 'aidlc-';
-const ROLE_SESSION_NAME_PATTERN = /^[\w+=,.@-]{2,64}$/;
-
-export const BEDROCK_ROLE_ERROR_CODES = Object.freeze({
-  BINDING_INVALID: BEDROCK_ROLE_BINDING_INVALID,
-  ASSUME_DENIED: 'BEDROCK_ROLE_ASSUME_DENIED',
-  ASSUME_THROTTLED: 'BEDROCK_ROLE_ASSUME_THROTTLED',
-  RESOLUTION_FAILED: 'BEDROCK_ROLE_RESOLUTION_FAILED',
-});
-
-// Never carries provider text: an STS message can name the caller session and
-// the target role, and the allowlisted code is the only thing that may be logged
-// or returned.
-const roleError = (code, message) => Object.assign(new Error(message), { code });
-
-const DENIED_STS_ERRORS = new Set([
-  'AccessDenied',
-  'AccessDeniedException',
-  'InvalidClientTokenId',
-  'UnrecognizedClientException',
-  'ExpiredToken',
-  'ExpiredTokenException',
-]);
-const THROTTLED_STS_ERRORS = new Set([
-  'Throttling',
-  'ThrottlingException',
-  'TooManyRequestsException',
-  'RequestLimitExceeded',
-  'SlowDown',
-]);
-
-// Map an STS failure onto one allowlisted code, discarding the original message.
-const classifyAssumeFailure = (error) => {
-  const name = error?.name || error?.Code || '';
-  if (DENIED_STS_ERRORS.has(name)) {
-    return roleError(BEDROCK_ROLE_ERROR_CODES.ASSUME_DENIED, 'Role assumption was denied');
-  }
-  if (THROTTLED_STS_ERRORS.has(name)) {
-    return roleError(BEDROCK_ROLE_ERROR_CODES.ASSUME_THROTTLED, 'Role assumption was throttled');
-  }
-  return roleError(BEDROCK_ROLE_ERROR_CODES.RESOLUTION_FAILED, 'Role assumption failed');
-};
-
-const composeRoleSessionName = (projectId) => {
-  const sessionName = `${ROLE_SESSION_NAME_PREFIX}${String(projectId || '')}`;
-  if (!projectId || !ROLE_SESSION_NAME_PATTERN.test(sessionName)) {
-    // Without a usable projectId there is no attribution, and attribution is the
-    // premise the whole showback model rests on — so fail rather than invent one.
-    throw roleError(
-      BEDROCK_ROLE_ERROR_CODES.RESOLUTION_FAILED,
-      'Role session name could not be composed for this request',
-    );
-  }
-  return sessionName;
-};
-
-const assumeBedrockRole = async ({ roleArn, externalId, projectId }, stsClient) => {
-  const RoleSessionName = composeRoleSessionName(projectId);
-  let result;
-  try {
-    result = await stsClient.send(
-      new AssumeRoleCommand({
-        RoleArn: roleArn,
-        RoleSessionName,
-        DurationSeconds: ROLE_SESSION_DURATION_SECONDS,
-        // con-tagsession-required: session tags need sts:TagSession in the
-        // customer's trust policy, so passing any would fail closed on every
-        // role that omits it. Attribution is RoleSessionName only.
-        ...(externalId ? { ExternalId: externalId } : {}),
-      }),
-    );
-  } catch (error) {
-    throw classifyAssumeFailure(error);
-  }
-  const credentials = result?.Credentials;
-  if (!credentials?.AccessKeyId || !credentials?.SecretAccessKey || !credentials?.SessionToken) {
-    throw roleError(
-      BEDROCK_ROLE_ERROR_CODES.RESOLUTION_FAILED,
-      'Role assumption returned no credentials',
-    );
-  }
-  return {
-    AccessKeyId: credentials.AccessKeyId,
-    SecretAccessKey: credentials.SecretAccessKey,
-    SessionToken: credentials.SessionToken,
-    Expiration:
-      credentials.Expiration instanceof Date
-        ? credentials.Expiration.toISOString()
-        : (credentials.Expiration ?? null),
-  };
-};
+//
+// The call itself, the session-name composition and the error classification live
+// in shared/bedrock-role.js, because the metadata broker's bind-time preflight
+// (req-binding-preflight) must exercise the SAME code it is predicting.
 
 const loggableAgentCredentialErrorCode = (error) => {
   switch (error?.code) {

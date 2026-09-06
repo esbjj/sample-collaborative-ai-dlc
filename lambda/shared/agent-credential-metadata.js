@@ -110,8 +110,42 @@ export const resolveEffectiveCredentialBindingsViaBroker = async (request, deps)
 
 export { invokeMetadataBroker };
 
+// req-binding-preflight. Ask the broker to attempt a bare AssumeRole for a binding
+// that has NOT been persisted yet, and return its verdict.
+//
+// Total by construction: a broker or transport failure becomes an `unavailable`
+// verdict rather than an exception, because the preflight is an input check and
+// not a security control — resolution re-checks the binding on every stage, so a
+// preflight that cannot run must never be the reason a legitimate save fails.
+export const preflightBedrockRoleBindingViaBroker = async (request, deps) => {
+  let result;
+  try {
+    result = await invokeMetadataBroker(
+      {
+        action: AGENT_CREDENTIAL_METADATA_ACTIONS.PREFLIGHT_BEDROCK_ROLE,
+        ...request,
+      },
+      deps,
+    );
+  } catch {
+    return { ok: false, cause: 'unavailable', candidates: [], available: false };
+  }
+  const preflight = result?.preflight;
+  if (!preflight || typeof preflight !== 'object' || Array.isArray(preflight)) {
+    return { ok: false, cause: 'unavailable', candidates: [], available: false };
+  }
+  return {
+    ok: preflight.ok === true,
+    cause: typeof preflight.cause === 'string' ? preflight.cause : 'unavailable',
+    sessionName: typeof preflight.sessionName === 'string' ? preflight.sessionName : null,
+    candidates: Array.isArray(preflight.candidates) ? preflight.candidates : [],
+    available: true,
+  };
+};
+
 export default {
   invokeMetadataBroker,
+  preflightBedrockRoleBindingViaBroker,
   readCredentialScopeStatusViaBroker,
   resolveEffectiveCredentialBindingsViaBroker,
 };
