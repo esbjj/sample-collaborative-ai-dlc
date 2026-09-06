@@ -1,12 +1,12 @@
 # ADR-0001 — IAM role (STS) as a Bedrock credential mode
 
-| | |
-| --- | --- |
-| **Status** | Proposed — **§3, §5 and §6 are partially superseded** by [the spec](../specs/bedrock-iam-role-credential-mode/design.md): v1 ships no refresh grant, no broker refresh action and no credential-helper binary. This ADR remains the record of why those alternatives were considered. |
-| **Date** | 2026-09-06 |
-| **Base commit** | `8e67ac5` (upstream `main`) — every `file:line` citation below is valid at this commit |
-| **Supersedes** | The `bedrock-auth-method` global SSM selector shipped in fork PR #1 (deleted, not replaced) |
-| **Scope** | `lambda/shared`, `lambda/credential-broker`, `lambda/agentcore`, `lambda/agents`, one Terraform IAM statement, one frontend card |
+|                 |                                                                                                                                                                                                                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**      | Proposed — **§3, §5 and §6 are partially superseded** by [the spec](../specs/bedrock-iam-role-credential-mode/design.md): v1 ships no refresh grant, no broker refresh action and no credential-helper binary. This ADR remains the record of why those alternatives were considered. |
+| **Date**        | 2026-09-06                                                                                                                                                                                                                                                                            |
+| **Base commit** | `8e67ac5` (upstream `main`) — every `file:line` citation below is valid at this commit                                                                                                                                                                                                |
+| **Supersedes**  | The `bedrock-auth-method` global SSM selector shipped in fork PR #1 (deleted, not replaced)                                                                                                                                                                                           |
+| **Scope**       | `lambda/shared`, `lambda/credential-broker`, `lambda/agentcore`, `lambda/agents`, one Terraform IAM statement, one frontend card                                                                                                                                                      |
 
 ## 1. Context
 
@@ -14,16 +14,16 @@
 
 Upstream #405 replaced the deployment-wide Bedrock secret with a three-scope credential hierarchy:
 
-| Fact | Evidence |
-| --- | --- |
-| Precedence is `user → space → platform`, first configured wins per provider | `lambda/shared/agent-credentials.js:9` (`AGENT_CREDENTIAL_SOURCES`), `resolveEffectiveCredentialBindings` |
-| A provider is one table row: SSM parameter name, input field, "set" field, env var | `lambda/shared/agent-credentials.js:22` (`PROVIDER_CONFIG`) |
-| A **credential broker** is the sole IAM principal permitted to read credential material; API Lambdas deliberately have no `ssm:GetParameter` on those paths | `lambda/credential-broker/`, `aws_iam_role.credential_broker` in `terraform/modules/api/lambda/main.tf` |
-| The broker validates a signed, short-lived grant and rejects a `projectId` that does not match the execution record | `authorizeAgentCredentialRequest`, `verifyIssuedAgentCredentialGrant` |
-| Auth is resolved **per invocation**; the base environment is scrubbed of credential variables each time | `lambda/agentcore/auth-resolver.js` header, `cleanBaseEnv`, assignment at `:196` |
-| The grant is destroyed before the command handler runs | `lambda/agentcore/http-server.js:107` — `delete handlerPayload.agentCredentialGrant` |
-| Each Bedrock CLI copies the bearer token into its own environment if present | `lambda/agentcore/cli/drivers.js:69` (claude), `:156` (opencode), `:227` (codex) |
-| Cost shown in-product is **not billing data** — it is token counts × Price List prices cached in SSM | `lambda/shared/model-pricing.js`; nothing under `lambda/` calls Cost Explorer or CUR |
+| Fact                                                                                                                                                        | Evidence                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Precedence is `user → space → platform`, first configured wins per provider                                                                                 | `lambda/shared/agent-credentials.js:9` (`AGENT_CREDENTIAL_SOURCES`), `resolveEffectiveCredentialBindings` |
+| A provider is one table row: SSM parameter name, input field, "set" field, env var                                                                          | `lambda/shared/agent-credentials.js:22` (`PROVIDER_CONFIG`)                                               |
+| A **credential broker** is the sole IAM principal permitted to read credential material; API Lambdas deliberately have no `ssm:GetParameter` on those paths | `lambda/credential-broker/`, `aws_iam_role.credential_broker` in `terraform/modules/api/lambda/main.tf`   |
+| The broker validates a signed, short-lived grant and rejects a `projectId` that does not match the execution record                                         | `authorizeAgentCredentialRequest`, `verifyIssuedAgentCredentialGrant`                                     |
+| Auth is resolved **per invocation**; the base environment is scrubbed of credential variables each time                                                     | `lambda/agentcore/auth-resolver.js` header, `cleanBaseEnv`, assignment at `:196`                          |
+| The grant is destroyed before the command handler runs                                                                                                      | `lambda/agentcore/http-server.js:107` — `delete handlerPayload.agentCredentialGrant`                      |
+| Each Bedrock CLI copies the bearer token into its own environment if present                                                                                | `lambda/agentcore/cli/drivers.js:69` (claude), `:156` (opencode), `:227` (codex)                          |
+| Cost shown in-product is **not billing data** — it is token counts × Price List prices cached in SSM                                                        | `lambda/shared/model-pricing.js`; nothing under `lambda/` calls Cost Explorer or CUR                      |
 
 The space is a genuine tenant boundary: spaces carry `owner`/`admin`/`member` roles enforced in Neptune traversals, a space is invisible without membership, and platform-wide administration is a separate Cognito group (`lambda/shared/authz.js` — `PLATFORM_ADMIN_GROUP`).
 
@@ -59,11 +59,11 @@ Passing session tags requires `sts:TagSession` in the target role's trust policy
 
 ### Architecture
 
-| Account | Role in this design |
-| --- | --- |
-| Platform account | AgentCore, Lambdas, Neptune, the broker |
-| Central Bedrock account | Bedrock inference role(s), model access, guardrails, quotas. **The bill.** May be the same account as the platform. |
-| Team application accounts | Not in the inference path. Deployment targets only. |
+| Account                   | Role in this design                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Platform account          | AgentCore, Lambdas, Neptune, the broker                                                                             |
+| Central Bedrock account   | Bedrock inference role(s), model access, guardrails, quotas. **The bill.** May be the same account as the platform. |
+| Team application accounts | Not in the inference path. Deployment targets only.                                                                 |
 
 Per-stage identity flow:
 
@@ -80,20 +80,36 @@ Consequences of broker-side assumption:
 Trust policy, same account:
 
 ```json
-{ "Version": "2012-10-17", "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "AWS": "arn:aws:iam::<platform-account>:role/collaborative-ai-dlc-credential-broker-<env>" },
-    "Action": "sts:AssumeRole" }] }
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<platform-account>:role/collaborative-ai-dlc-credential-broker-<env>"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
 ```
 
 Trust policy, cross account — the external ID is **mandatory** here, per the confused-deputy guidance:
 
 ```json
-{ "Version": "2012-10-17", "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "AWS": "arn:aws:iam::<platform-account>:role/collaborative-ai-dlc-credential-broker-<env>" },
-    "Action": "sts:AssumeRole",
-    "Condition": { "StringEquals": { "sts:ExternalId": "<platform-generated-value>" } } }] }
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<platform-account>:role/collaborative-ai-dlc-credential-broker-<env>"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": { "StringEquals": { "sts:ExternalId": "<platform-generated-value>" } }
+    }
+  ]
+}
 ```
 
 ### The `sts:AssumeRole` resource problem
@@ -125,8 +141,8 @@ export const AGENT_CREDENTIAL_GRANT_PURPOSES = Object.freeze([
   BEDROCK_ROLE_REFRESH_PURPOSE,
 ]);
 
-export const AGENT_CREDENTIAL_GRANT_TTL_SECONDS = 300;            // unchanged
-export const BEDROCK_ROLE_REFRESH_TTL_SECONDS = 8 * 60 * 60;      // == STAGE_CALLBACK_TIMEOUT
+export const AGENT_CREDENTIAL_GRANT_TTL_SECONDS = 300; // unchanged
+export const BEDROCK_ROLE_REFRESH_TTL_SECONDS = 8 * 60 * 60; // == STAGE_CALLBACK_TIMEOUT
 
 const ttlCeilingFor = (purpose) =>
   purpose === BEDROCK_ROLE_REFRESH_PURPOSE
@@ -138,11 +154,11 @@ Both the sign-time guard and the verify-time guard consult `ttlCeilingFor(purpos
 
 Additional constraints enforced in `normalizedClaims` when `purpose === BEDROCK_ROLE_REFRESH_PURPOSE`:
 
-| Constraint | Rationale |
-| --- | --- |
-| `executionId` **required** (nullable today) | There is no execution to re-validate without it |
-| `projectId` **required** | The tenant boundary and the server-side binding lookup key |
-| `stageInstanceId` **required** (new claim field) | Pins the grant to one stage attempt, so it dies with the attempt rather than living for the whole execution |
+| Constraint                                                           | Rationale                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `executionId` **required** (nullable today)                          | There is no execution to re-validate without it                                                                                                                                                                                       |
+| `projectId` **required**                                             | The tenant boundary and the server-side binding lookup key                                                                                                                                                                            |
+| `stageInstanceId` **required** (new claim field)                     | Pins the grant to one stage attempt, so it dies with the attempt rather than living for the whole execution                                                                                                                           |
 | Exactly **one** binding, `provider === 'bedrock'`, `mode === 'role'` | **The most important constraint.** A refresh grant must never be redeemable for a bearer token: a bearer token needs no refresh, and a long-lived grant redeemable for a long-lived secret is a strict downgrade of the current model |
 
 Everything else — HMAC-SHA256 over base64url claims, `version`/`audience` pinning, `timingSafeEqual`, 8 KiB token cap, 30-second clock skew, the secret loaded from SSM with a 32-byte minimum — is reused unchanged.
@@ -196,11 +212,11 @@ One executable, `/opt/aidlc/bin/aidlc-bedrock-credentials`, emitting the **stand
 
 All three Bedrock CLIs consume that one format (probe 2, §4.2):
 
-| CLI | Wiring | Refresh behaviour |
-| --- | --- | --- |
-| **Claude Code 2.1.246** | `awsCredentialExport` in the per-stage settings file, **without** `awsAuthRefresh` | Runs at session start and on each credential reload. With a valid ISO-8601 `Expiration` it caches until five minutes before that time, then re-runs the command. Accepts this flat shape as of 2.1.181; `Expiration` honoured as of 2.1.176; standalone `awsCredentialExport` as of 2.1.206 — the pinned version clears all three |
-| **OpenCode 1.17.20** | `credential_process` in a written AWS config file, selected by `AWS_CONFIG_FILE` + `AWS_PROFILE` | AWS SDK JS provider chain re-invokes the helper on expiry |
-| **Codex 0.145.0** | Same file, same mechanism | AWS SDK for Rust provider chain, same behaviour |
+| CLI                     | Wiring                                                                                           | Refresh behaviour                                                                                                                                                                                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude Code 2.1.246** | `awsCredentialExport` in the per-stage settings file, **without** `awsAuthRefresh`               | Runs at session start and on each credential reload. With a valid ISO-8601 `Expiration` it caches until five minutes before that time, then re-runs the command. Accepts this flat shape as of 2.1.181; `Expiration` honoured as of 2.1.176; standalone `awsCredentialExport` as of 2.1.206 — the pinned version clears all three |
+| **OpenCode 1.17.20**    | `credential_process` in a written AWS config file, selected by `AWS_CONFIG_FILE` + `AWS_PROFILE` | AWS SDK JS provider chain re-invokes the helper on expiry                                                                                                                                                                                                                                                                         |
+| **Codex 0.145.0**       | Same file, same mechanism                                                                        | AWS SDK for Rust provider chain, same behaviour                                                                                                                                                                                                                                                                                   |
 
 ```ini
 [profile aidlc]
@@ -233,7 +249,7 @@ const configuredCount =
   Number(Boolean(settings?.bedrockBearerTokenSet)) + Number(Boolean(settings?.kiroApiKeySet));
 ```
 
-and line 244 passes `isSet={Boolean(settings?.bedrockBearerTokenSet)}`. So "configured", the provider count, and the platform-fallback hint are all derived from *a secret being present*. A role binding is a non-secret ARN, so a space that configures one would render as having no credentials — the same shape of bug as the capabilities defect, in a different layer.
+and line 244 passes `isSet={Boolean(settings?.bedrockBearerTokenSet)}`. So "configured", the provider count, and the platform-fallback hint are all derived from _a secret being present_. A role binding is a non-secret ARN, so a space that configures one would render as having no credentials — the same shape of bug as the capabilities defect, in a different layer.
 
 Both cards need a mode-aware notion of configured. Note also that `bedrockBearerTokenSet` is the API contract field name, generated from `PROVIDER_CONFIG[...].setField`; role mode should add a mode discriminator rather than overload that boolean, so the meaning of the existing field never changes for existing clients.
 
@@ -256,11 +272,11 @@ The role permitted 12 hours, so the role was never the limiter — the caller's 
 
 ### 4.2 Probe 2 — all three CLIs support a refreshable credential source
 
-| CLI | Result |
-| --- | --- |
-| **OpenCode 1.17.20** | Downloaded artifact sha256 `0a41572e…d86d9afc` is **byte-identical to the Dockerfile's pinned digest**, so this is the exact binary in the image. Contains `credential_process` ×7, `AWS_CONTAINER_CREDENTIALS_FULL_URI` ×5, `…RELATIVE_URI` ×5, `AWS_WEB_IDENTITY_TOKEN_FILE` ×3, `sso_start_url` ×10 |
-| **Codex 0.145.0** | `aarch64-unknown-linux-musl`, statically linked, stripped. `credential_process` ×7, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_SHARED_CREDENTIALS_FILE` ×2, `AWS_WEB_IDENTITY_TOKEN_FILE`, plus `aws-sdk` ×53, `sigv4` ×21, `AWS4-HMAC-SHA256`, `Bedrock` ×77 — it signs SigV4 against Bedrock through the Rust SDK's full provider chain |
-| **Claude Code 2.1.246** | Pinned version exceeds every documented minimum for `awsCredentialExport` |
+| CLI                     | Result                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **OpenCode 1.17.20**    | Downloaded artifact sha256 `0a41572e…d86d9afc` is **byte-identical to the Dockerfile's pinned digest**, so this is the exact binary in the image. Contains `credential_process` ×7, `AWS_CONTAINER_CREDENTIALS_FULL_URI` ×5, `…RELATIVE_URI` ×5, `AWS_WEB_IDENTITY_TOKEN_FILE` ×3, `sso_start_url` ×10                                    |
+| **Codex 0.145.0**       | `aarch64-unknown-linux-musl`, statically linked, stripped. `credential_process` ×7, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_SHARED_CREDENTIALS_FILE` ×2, `AWS_WEB_IDENTITY_TOKEN_FILE`, plus `aws-sdk` ×53, `sigv4` ×21, `AWS4-HMAC-SHA256`, `Bedrock` ×77 — it signs SigV4 against Bedrock through the Rust SDK's full provider chain |
+| **Claude Code 2.1.246** | Pinned version exceeds every documented minimum for `awsCredentialExport`                                                                                                                                                                                                                                                                 |
 
 This refutes the prior working assumption that Codex might be bearer-token only, and it is why fix A needs no per-CLI logic.
 
@@ -283,13 +299,13 @@ The worst observed stage consumed **~50–58 % of a 3600 s credential**. That re
 
 ## 5. Expiry options A / B / C
 
-| | Mechanism | Ceiling | Verdict |
-| --- | --- | --- | --- |
-| **A** | Refreshable credential source: one helper, `awsCredentialExport` + `credential_process` | Unbounded (refreshes indefinitely) | **Design target.** Probe 2 removed the only blocking risk |
-| **B** | `DurationSeconds=3600`, expiry surfaced as a first-class stage failure so the orchestrator's existing retry mints fresh credentials | Exactly 3600 s (probe 1) | **Ship underneath A.** With p99 at 20 minutes this is rare and survivable |
-| **C** | `AssumeRoleWithWebIdentity` — not chaining, honours `MaxSessionDuration` up to 12 h | 12 h, no refresh mechanism needed | **Documented, not built** |
+|       | Mechanism                                                                                                                           | Ceiling                            | Verdict                                                                   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
+| **A** | Refreshable credential source: one helper, `awsCredentialExport` + `credential_process`                                             | Unbounded (refreshes indefinitely) | **Design target.** Probe 2 removed the only blocking risk                 |
+| **B** | `DurationSeconds=3600`, expiry surfaced as a first-class stage failure so the orchestrator's existing retry mints fresh credentials | Exactly 3600 s (probe 1)           | **Ship underneath A.** With p99 at 20 minutes this is rare and survivable |
+| **C** | `AssumeRoleWithWebIdentity` — not chaining, honours `MaxSessionDuration` up to 12 h                                                 | 12 h, no refresh mechanism needed  | **Documented, not built**                                                 |
 
-**Build B first, then layer A on top.** B is a few lines and converts a mysterious mid-stage death into a legible, automatically retried failure, so role mode is never *broken* by expiry at any point in the rollout — only occasionally slower. A then makes it rare enough to ignore.
+**Build B first, then layer A on top.** B is a few lines and converts a mysterious mid-stage death into a legible, automatically retried failure, so role mode is never _broken_ by expiry at any point in the rollout — only occasionally slower. A then makes it rare enough to ignore.
 
 C is rejected for a reason that comes from the project's own goal: it requires every customer bringing a role to register an OIDC provider and write a federated trust policy instead of pasting one role ARN. That is a large regression in setup simplicity, and it is additionally unverified whether AgentCore exposes a usable OIDC token. It remains the correct escape hatch for anyone who genuinely needs single stages beyond 8 hours.
 
@@ -297,28 +313,28 @@ C is rejected for a reason that comes from the project's own goal: it requires e
 
 ## 6. Change inventory
 
-| File | Change |
-| --- | --- |
-| `lambda/shared/agent-credentials.js` | Parse the binding value as bearer-or-role; add the three AWS credential env names to `AGENT_CREDENTIAL_ENV_NAMES` so `cleanBaseEnv` scrubs them per invocation |
-| `lambda/shared/agent-credential-grants.js` | Refresh purpose, purpose-aware TTL ceiling, `stageInstanceId` claim, role-mode-only binding constraint |
-| `lambda/credential-broker/index.js` | New `refresh-bedrock-role-credentials` action; execution-status + `projectId` re-validation; server-side binding re-resolution; `AssumeRole`; new error codes |
-| `lambda/agentcore/auth-resolver.js` | Set three env vars instead of one when the broker returns credentials; carry the refresh grant in the invocation context |
-| `lambda/agentcore/cli/drivers.js` | Write the AWS config file; set `AWS_CONFIG_FILE`/`AWS_PROFILE` for OpenCode and Codex; set `awsCredentialExport` for Claude Code |
-| `lambda/agentcore/commands/capabilities.js` | `authed` = bearer **or** session credentials (§3.4) |
-| `lambda/agentcore/Dockerfile` | Install the credential helper |
-| `lambda/agents/index.js` (settings API) | Accept a role ARN + optional external ID; return a mode alongside the existing `*Set` booleans; echo the ARN, mask the external ID |
-| `frontend/src/components/admin/AgentCredentialsCard.tsx` | Platform-scope card — the central default (§3.5) |
-| `frontend/src/components/settings/AgentCredentialScopeCard.tsx` | Space- and user-scope card — the override (§3.5) |
-| `terraform/modules/api/lambda/main.tf` | One `sts:AssumeRole` statement on the broker role, resource from `bedrock_assumable_role_arns` |
-| — | **No change to the AgentCore execution role.** No new SSM parameter paths. `bedrock-auth-method` is deleted |
+| File                                                            | Change                                                                                                                                                         |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lambda/shared/agent-credentials.js`                            | Parse the binding value as bearer-or-role; add the three AWS credential env names to `AGENT_CREDENTIAL_ENV_NAMES` so `cleanBaseEnv` scrubs them per invocation |
+| `lambda/shared/agent-credential-grants.js`                      | Refresh purpose, purpose-aware TTL ceiling, `stageInstanceId` claim, role-mode-only binding constraint                                                         |
+| `lambda/credential-broker/index.js`                             | New `refresh-bedrock-role-credentials` action; execution-status + `projectId` re-validation; server-side binding re-resolution; `AssumeRole`; new error codes  |
+| `lambda/agentcore/auth-resolver.js`                             | Set three env vars instead of one when the broker returns credentials; carry the refresh grant in the invocation context                                       |
+| `lambda/agentcore/cli/drivers.js`                               | Write the AWS config file; set `AWS_CONFIG_FILE`/`AWS_PROFILE` for OpenCode and Codex; set `awsCredentialExport` for Claude Code                               |
+| `lambda/agentcore/commands/capabilities.js`                     | `authed` = bearer **or** session credentials (§3.4)                                                                                                            |
+| `lambda/agentcore/Dockerfile`                                   | Install the credential helper                                                                                                                                  |
+| `lambda/agents/index.js` (settings API)                         | Accept a role ARN + optional external ID; return a mode alongside the existing `*Set` booleans; echo the ARN, mask the external ID                             |
+| `frontend/src/components/admin/AgentCredentialsCard.tsx`        | Platform-scope card — the central default (§3.5)                                                                                                               |
+| `frontend/src/components/settings/AgentCredentialScopeCard.tsx` | Space- and user-scope card — the override (§3.5)                                                                                                               |
+| `terraform/modules/api/lambda/main.tf`                          | One `sts:AssumeRole` statement on the broker role, resource from `bedrock_assumable_role_arns`                                                                 |
+| —                                                               | **No change to the AgentCore execution role.** No new SSM parameter paths. `bedrock-auth-method` is deleted                                                    |
 
 ## 7. Well-Architected alignment
 
-**Security — the strongest gain.** Replacing a long-lived shared bearer token with short-lived STS credentials is SEC02's "use temporary credentials". Least privilege is served twice: the invoke-only, family-scoped, condition-fenced grant, and a container that holds no assume capability at all. The external ID addresses the confused-deputy problem. Blast radius is bounded by resolving the binding server-side from the broker's verified claim. *Tradeoffs:* a new cross-account trust relationship; a new secret (the external ID); and `sts:AssumeRole` with a wide default resource, mitigated as described in §2.
+**Security — the strongest gain.** Replacing a long-lived shared bearer token with short-lived STS credentials is SEC02's "use temporary credentials". Least privilege is served twice: the invoke-only, family-scoped, condition-fenced grant, and a container that holds no assume capability at all. The external ID addresses the confused-deputy problem. Blast radius is bounded by resolving the binding server-side from the broker's verified claim. _Tradeoffs:_ a new cross-account trust relationship; a new secret (the external ID); and `sts:AssumeRole` with a wide default resource, mitigated as described in §2.
 
-**Cost Optimization.** COST03 is met at the mechanism level: identity reaches Bedrock as `RoleSessionName=aidlc-<spaceId>`, so CloudTrail and invocation logs carry the tenant boundary from day one, and the customer opts into dollars on their own schedule. *Tradeoff:* native attribution delivers aggregated dollars per usage type per day, never a per-request row, so per-intent cost remains app-computed.
+**Cost Optimization.** COST03 is met at the mechanism level: identity reaches Bedrock as `RoleSessionName=aidlc-<spaceId>`, so CloudTrail and invocation logs carry the tenant boundary from day one, and the customer opts into dollars on their own schedule. _Tradeoff:_ native attribution delivers aggregated dollars per usage type per day, never a per-request row, so per-intent cost remains app-computed.
 
-**Operational Excellence.** A role ARN is non-secret, auditable in CloudTrail and diffable in IaC, unlike a rotating opaque token. Model access, guardrails and quotas consolidate in one account. *Tradeoffs:* a new cross-account dependency; drift risk between the platform's binding and the role's real state — which argues for a bind-time "test this binding" preflight (a bare `AssumeRole`, no invoke) so misconfiguration surfaces at save time rather than mid-stage.
+**Operational Excellence.** A role ARN is non-secret, auditable in CloudTrail and diffable in IaC, unlike a rotating opaque token. Model access, guardrails and quotas consolidate in one account. _Tradeoffs:_ a new cross-account dependency; drift risk between the platform's binding and the role's real state — which argues for a bind-time "test this binding" preflight (a bare `AssumeRole`, no invoke) so misconfiguration surfaces at save time rather than mid-stage.
 
 **Reliability — weakest pillar.** Expiry is a failure mode the bearer token does not have (§5). And the central account is a shared failure domain: **Bedrock quotas are per account, per model, per region**, so one team's runaway intent can throttle every other team. Per-space roles would not have fixed this. What does, and what this design enables at no extra cost: a space can override with a role in its own account, which carries its own quota. The override is the noisy-neighbour escape hatch.
 
@@ -337,7 +353,7 @@ C is rejected for a reason that comes from the project's own goal: it requires e
 3. **Value encoding** — JSON in the existing parameter. Alternatives: sniffing for an `arn:` prefix (no room for an external ID), or a second parameter (new path, new IAM pattern, more change).
 4. **Bind-time preflight** — worth building in v1? It converts a class of mid-stage failure into an input-validation error.
 5. **`bedrock_assumable_role_arns` default** — `["*"]` for usability, or force operators to enumerate.
-6. **Does the user scope keep its precedence?** Left unchanged deliberately. A member with a personal role binding uses it in every space they belong to, and with cross-account roles that bills their account for another team's work. This is *not new* — a personal bearer token already bills whatever account issued it — so role mode introduces no new defect, only a more visible one. Changing precedence would be a behaviour change to shipped functionality in service of a cost report that is descoped.
+6. **Does the user scope keep its precedence?** Left unchanged deliberately. A member with a personal role binding uses it in every space they belong to, and with cross-account roles that bills their account for another team's work. This is _not new_ — a personal bearer token already bills whatever account issued it — so role mode introduces no new defect, only a more visible one. Changing precedence would be a behaviour change to shipped functionality in service of a cost report that is descoped.
 
 ## 10. Verification plan
 
