@@ -33,7 +33,13 @@ describe('agent credential metadata broker', () => {
     );
 
     expect(result).toEqual({
-      status: { bedrockBearerTokenSet: true, kiroApiKeySet: false },
+      status: {
+        bedrockBearerTokenSet: true,
+        kiroApiKeySet: false,
+        bedrockMode: 'bearer',
+        bedrockRoleArn: null,
+        bedrockExternalIdSet: false,
+      },
     });
     expect(JSON.stringify(result)).not.toContain('secret-bedrock');
     expect(ssmMock.commandCalls(GetParametersCommand)[0].args[0].input).toMatchObject({

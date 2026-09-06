@@ -10,12 +10,15 @@ import {
 import {
   AGENT_CREDENTIAL_ENV_NAMES,
   AWS_TEMPORARY_CREDENTIAL_ENV_NAMES,
+  EXTERNAL_ID_ENTROPY_BYTES,
   agentCredentialPath,
   availableClisForBindings,
   credentialSourcesFromBindings,
   credentialValueKind,
   credentialValueKindSafe,
   deleteCredentialScope,
+  describeBedrockBinding,
+  generateExternalId,
   isConfiguredCredentialValue,
   looksLikeRoleBindingValue,
   parseRoleBindingValue,
@@ -276,6 +279,9 @@ describe('agent credentials', () => {
     expect(status).toEqual({
       bedrockBearerTokenSet: false,
       kiroApiKeySet: false,
+      bedrockMode: null,
+      bedrockRoleArn: null,
+      bedrockExternalIdSet: false,
     });
   });
 
@@ -293,7 +299,45 @@ describe('agent credentials', () => {
     expect(await readCredentialScopeStatus(ssm, { base: '/app/dev', source: 'platform' })).toEqual({
       bedrockBearerTokenSet: false,
       kiroApiKeySet: true,
+      bedrockMode: 'role',
+      bedrockRoleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+      bedrockExternalIdSet: false,
     });
+  });
+
+  // specs/bedrock-iam-role-credential-mode Phase 2 — req-configured-semantics.
+  // The mode-aware fields are what let a card report a role-only scope as
+  // configured. This is the completion criterion named in task 11.
+  it('reports mode role with a populated ARN and no bearer secret for a role binding', async () => {
+    values.set(
+      '/app/dev/bedrock-bearer-token',
+      JSON.stringify({
+        roleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+        externalId: 'abc123-external',
+      }),
+    );
+
+    const status = await readCredentialScopeStatus(ssm, { base: '/app/dev', source: 'platform' });
+
+    expect(status.bedrockBearerTokenSet).toBe(false);
+    expect(status.bedrockMode).toBe('role');
+    expect(status.bedrockRoleArn).toBe('arn:aws:iam::111122223333:role/aidlc-bedrock-inference');
+    // The external ID is a secret: only its presence is reported, and the value
+    // must never appear anywhere in the status (req-external-id-lifecycle).
+    expect(status.bedrockExternalIdSet).toBe(true);
+    expect(JSON.stringify(status)).not.toContain('abc123-external');
+  });
+
+  // A malformed role-shaped value must NOT report bearer. Reporting bearer would
+  // tell the operator a usable secret is present while the binding is broken.
+  it('reports mode role with a null ARN for a malformed role-shaped value', async () => {
+    values.set('/app/dev/bedrock-bearer-token', '{"roleArn":"not-an-arn"}');
+
+    const status = await readCredentialScopeStatus(ssm, { base: '/app/dev', source: 'platform' });
+
+    expect(status.bedrockMode).toBe('role');
+    expect(status.bedrockRoleArn).toBe(null);
+    expect(status.bedrockBearerTokenSet).toBe(false);
   });
 
   it('still resolves a role binding as a configured effective binding', async () => {
@@ -329,7 +373,13 @@ describe('agent credentials', () => {
         source: 'user',
         userId: 'u-1',
       }),
-    ).toEqual({ bedrockBearerTokenSet: true, kiroApiKeySet: true });
+    ).toEqual({
+      bedrockBearerTokenSet: true,
+      kiroApiKeySet: true,
+      bedrockMode: 'bearer',
+      bedrockRoleArn: null,
+      bedrockExternalIdSet: false,
+    });
 
     await writeCredentialScope(ssm, {
       base: '/app/dev',
@@ -378,5 +428,80 @@ describe('agent credentials', () => {
         projectId: 'p-1',
       }),
     ).resolves.toEqual({ deleted: [], missing: ['bedrock', 'kiro'] });
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode Phase 2 — req-external-id-lifecycle.
+// The platform generates the external ID, so the generator must be a CSPRNG with
+// at least 128 bits of entropy and must never produce a value the write path
+// would reject.
+describe('external ID generation', () => {
+  const ROLE_ARN = 'arn:aws:iam::444455556666:role/aidlc-bedrock-cross';
+  it('draws at least 128 bits of entropy from the injected CSPRNG', () => {
+    expect(EXTERNAL_ID_ENTROPY_BYTES).toBeGreaterThanOrEqual(16);
+
+    const calls = [];
+    const fake = (n) => {
+      calls.push(n);
+      return Buffer.alloc(n, 7);
+    };
+    generateExternalId(fake);
+
+    // The byte count is requested from the CSPRNG in ONE draw — a loop of small
+    // draws would still satisfy a length assertion while weakening the source.
+    expect(calls).toEqual([EXTERNAL_ID_ENTROPY_BYTES]);
+  });
+
+  it('never generates a value the write-path validator would reject', () => {
+    // The real validator, not a copy of its regex: this is what guarantees a
+    // generated ID can always be stored. 200 draws exercises the alphabet,
+    // including the base64url characters that a stricter charset would refuse.
+    for (let i = 0; i < 200; i += 1) {
+      const externalId = generateExternalId();
+      const verdict = validateCredentialScopeUpdate({
+        source: 'platform',
+        update: { bedrockBearerToken: JSON.stringify({ roleArn: ROLE_ARN, externalId }) },
+      });
+      expect(verdict).toBe(null);
+    }
+  });
+
+  it('generates a distinct value per call so one is never shared across scopes', () => {
+    const seen = new Set(Array.from({ length: 100 }, () => generateExternalId()));
+    expect(seen.size).toBe(100);
+  });
+});
+
+// describeBedrockBinding is on the settings READ path, so it must be total: a
+// settings page has to render for any stored byte sequence rather than 500.
+describe('describeBedrockBinding is total', () => {
+  it('returns a shape and never throws for hostile or empty stored values', () => {
+    const hostile = [
+      undefined,
+      null,
+      '',
+      '   ',
+      'placeholder',
+      'a-plain-bearer-token',
+      '{',
+      '{}',
+      '[]',
+      '[{"roleArn":"arn:aws:iam::111122223333:role/x"}]',
+      '{"roleArn":""}',
+      '{"roleArn":"not-an-arn"}',
+      '{"roleArn":123}',
+      `{"roleArn":"arn:aws:iam::111122223333:role/${'x'.repeat(4000)}"}`,
+      '{"roleArn":"arn:aws:iam::111122223333:role/x","externalId":" "}',
+    ];
+    for (const value of hostile) {
+      const described = describeBedrockBinding(value);
+      expect(Object.keys(described).toSorted()).toEqual(['externalIdSet', 'mode', 'roleArn']);
+      expect([null, 'bearer', 'role']).toContain(described.mode);
+      expect(typeof described.externalIdSet).toBe('boolean');
+      // A broken binding must never be reported as a usable bearer secret.
+      if (typeof value === 'string' && value.trim().startsWith('{')) {
+        expect(described.mode).toBe('role');
+      }
+    }
   });
 });
