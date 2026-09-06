@@ -464,6 +464,20 @@ resource "aws_iam_role_policy" "agents_orchestrator" {
         ]
       },
       {
+        # Bedrock role-binding external IDs (specs/bedrock-iam-role-credential-mode:
+        # dec-external-id-storage). Deliberately OUTSIDE the agent-credentials/
+        # paths above: the external ID is not a credential, so the write-only
+        # discipline that keeps this broad API role unable to decrypt credential
+        # material is untouched, and the settings API can read its own generated
+        # value back to hand to an operator without any read grant on credentials.
+        Effect = "Allow"
+        Action = ["ssm:GetParameter", "ssm:PutParameter"]
+        Resource = [
+          "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/bedrock-external-id",
+          "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/projects/*/bedrock-external-id",
+        ]
+      },
+      {
         # Metadata-only broker: set-state and effective source bindings, never
         # values. The value-redemption broker remains AgentCore-only.
         Effect   = "Allow"
@@ -1082,6 +1096,15 @@ module "credential_metadata_lambda" {
 
   environment_variables = {
     AGENT_SETTINGS_SSM_PREFIX = "/${var.project_name}/${var.environment}"
+    # Bind-time Bedrock role preflight (specs/bedrock-iam-role-credential-mode:
+    # req-binding-preflight). This function shares the credential-broker role, so
+    # it already holds the one sts:AssumeRole grant and no other role gains it.
+    # The allowlist is passed so a role outside it is reported deterministically
+    # without an STS round trip, and the broker role ARN so the failure guidance can
+    # name the exact principal an operator must trust.
+    BEDROCK_ASSUMABLE_ROLE_ARNS = jsonencode(var.bedrock_assumable_role_arns)
+    CREDENTIAL_BROKER_ROLE_ARN  = aws_iam_role.credential_broker.arn
+    PLATFORM_ACCOUNT_ID         = data.aws_caller_identity.current.account_id
   }
 }
 

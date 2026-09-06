@@ -56,7 +56,13 @@ module "agents_lambda" {
     AGENT_SETTINGS_SSM_PREFIX           = "/${var.project_name}/${var.environment}"
     AGENT_CREDENTIAL_METADATA_FUNCTION  = "${var.project_name}-credential-metadata-${var.environment}"
     AGENT_CREDENTIAL_GRANT_SECRET_PARAM = var.agent_credential_grant_secret_param_name
-    CORS_ALLOWED_ORIGINS                = var.cors_allowed_origins
+    # Decides whether a Bedrock role binding is cross-account and therefore needs
+    # a platform-generated external ID (specs/bedrock-iam-role-credential-mode:
+    # dec-external-id-scope). Passed explicitly so the common path needs no
+    # sts:GetCallerIdentity round trip; the handler falls back to that call when
+    # this is absent.
+    PLATFORM_ACCOUNT_ID  = data.aws_caller_identity.current.account_id
+    CORS_ALLOWED_ORIGINS = var.cors_allowed_origins
     # v2 model discovery: lets GET /agents/capabilities?models=1 invoke the
     # runtime's `capabilities` command for Kiro's model list + auth state.
     AGENTCORE_RUNTIME_ARN         = var.agentcore_runtime_arn
