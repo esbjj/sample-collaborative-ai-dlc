@@ -356,7 +356,9 @@ requirements:
       - WHEN a role binding is saved THEN the system SHALL attempt an AssumeRole and report a typed failure without persisting an unusable binding
       - THE SYSTEM SHALL run the preflight in the broker, and SHALL add no sts:AssumeRole permission to any other role
       - THE SYSTEM SHALL perform no model invocation in the preflight
-      - WHEN a preflight fails THEN the system SHALL name the cause category without echoing provider text, distinguishing a missing principal, a failed external ID, a session-name condition mismatch and a role outside the allowlist
+      - WHEN a preflight fails THEN the system SHALL name the cause category without echoing provider text, reporting a role outside the allowlist exactly and enumerating a missing principal, a failed external ID and a session-name condition mismatch as candidates with the value to check each against
+      - THE SYSTEM SHALL NOT infer a cause from STS message text, because a wrong external ID, an omitted external ID, a session-name mismatch, an untrusted principal and a nonexistent role were MEASURED to return a byte-identical AccessDenied differing only in the resource ARN
+      - WHEN the preflight itself cannot run THEN the system SHALL permit the save, because refusing a legitimate binding while the checker is unavailable is worse than persisting one whose failure is already legible
       - THE SYSTEM SHALL NOT invoke the preflight in a loop, since it shares the STS request-rate surface
       - THE SYSTEM SHALL document it as an input check and not a security control, because a trust policy can change after save
   - id: req-resolution-resilience

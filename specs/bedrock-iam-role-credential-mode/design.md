@@ -374,6 +374,28 @@ decisions:
       one role -- there the operator must enumerate each space's value in one trust policy, which the
       session-name condition already achieves, so a shared role should prefer a single
       platform-scope binding.
+  - id: dec-external-id-storage
+    title: The external ID lives in its own per-scope parameter, not only inside the binding
+    status: accepted
+    context: >-
+      req-binding-preflight refuses to persist a binding whose AssumeRole fails, and
+      req-same-and-cross-account's bootstrap order requires the operator to see the external ID
+      before they can write the trust policy the preflight checks. If the value existed only inside
+      the binding, the first (necessarily failing) cross-account save would discard it and the retry
+      would generate a different one, so the trust policy the operator had just written would already
+      be stale and the bootstrap would never converge.
+    decision: >-
+      Generate the value idempotently into a dedicated per-scope parameter — {prefix}/bedrock-external-id
+      and {prefix}/projects/<projectId>/bedrock-external-id — and copy it into the binding value when a
+      save succeeds. The binding remains the single value the broker reads, so resolution is unchanged.
+    consequences: >-
+      The value is stable across rejected saves, so the two-attempt cross-account bootstrap converges
+      and recovery is a plain read. The parameter deliberately sits OUTSIDE the agent-credentials
+      paths: the external ID is not a credential, so the settings API can read its own generated value
+      back without gaining any read permission on credential material, and the broker's
+      exclusive-read discipline for credentials is untouched. Costs one new SSM path and a small IAM
+      statement. A generated value can outlive the binding it was made for; it is inert, and reusing
+      it on a later binding for the same scope is the intended behaviour.
   - id: dec-user-scope-role-deferred
     title: Role bindings are deferred at user scope; user scope stays bearer-only in v1
     status: accepted
