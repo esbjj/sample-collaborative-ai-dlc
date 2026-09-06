@@ -194,7 +194,7 @@ Credential safety, restated as requirements:
 - STS credentials are never persisted; minted per refresh, held in process environment only.
 - Never written to `/mnt/workspace`.
 - Never logged. The repository's existing redaction fixture (the deliberate fake `AKIA…` negative control) must be extended to cover `AWS_SESSION_TOKEN` and `AWS_SECRET_ACCESS_KEY`.
-- The **role ARN is not a secret** and should be echoed back to the UI. The **external ID is** — store it as `SecureString` and report "set / not set", the shape the settings API already uses for the bearer token.
+- The **role ARN is not a secret** and should be echoed back to the UI. The **external ID is not a secret either** — AWS says so in terms: "AWS does not treat the external ID as a secret … The external ID for a role can be seen by anyone with permission to view the role." Store it as `SecureString` (encryption at rest is free) but return it to any principal that may modify the binding, idempotently rather than once, because an operator has to paste it into a trust policy and must be able to re-read it to reconcile or recover. Both values are nonetheless tenant-identifying, so neither belongs on the lower-privilege agent settings read that any authenticated user can call; that surface keeps the "set / not set" shape. The bearer token and Kiro key remain genuine secrets and are never returned at any scope.
 
 ### 3.3 The single credential-helper contract
 
