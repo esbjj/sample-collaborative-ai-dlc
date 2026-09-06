@@ -112,6 +112,10 @@ describe('personal agent credentials', () => {
     expect(JSON.parse(response.body)).toEqual({
       bedrockBearerTokenSet: true,
       kiroApiKeySet: false,
+      // Phase 2 mode-aware fields: a user scope stays bearer-only
+      // (dec-user-scope-role-deferred), so mode can never be role here.
+      bedrockMode: null,
+      bedrockExternalIdSet: false,
     });
     expect(ssmMock.commandCalls(GetParametersCommand)).toHaveLength(0);
   });
@@ -215,5 +219,45 @@ describe('platform bedrock role binding', () => {
     expect(
       ssmMock.commandCalls(PutParameterCommand).map((call) => call.args[0].input.Value),
     ).toEqual(['ABSKQmVkcm9jaw==', 'placeholder']);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-configured-semantics,
+// req-external-id-lifecycle, req-same-and-cross-account.
+//
+// GET /agents/settings carries no platform-admin gate: any authenticated user can
+// call it, which is deliberate because the UI needs to know whether credentials
+// exist at all. Neither the external ID nor the role ARN may travel on it. Both
+// are non-secret per dec-external-id-not-secret, but both are tenant-identifying
+// and no lower-privilege surface needs them.
+describe('the ungated settings read exposes no binding detail', () => {
+  it('returns mode and set-state but neither the role ARN nor the external ID', async () => {
+    const ROLE_ARN = 'arn:aws:iam::444455556666:role/aidlc-bedrock-cross';
+    const EXTERNAL_ID = 'super-distinctive-external-id';
+    credentialMetadataHandler = () => ({
+      ok: true,
+      // A broker that volunteers MORE than the reader should expose: the reader
+      // must drop it rather than pass it through.
+      status: {
+        bedrockBearerTokenSet: false,
+        kiroApiKeySet: false,
+        bedrockMode: 'role',
+        bedrockRoleArn: ROLE_ARN,
+        bedrockExternalIdSet: true,
+        externalId: EXTERNAL_ID,
+      },
+    });
+    ssmMock.on(GetParametersCommand).resolves({ Parameters: [] });
+
+    // No cognito:groups claim — an ordinary authenticated user.
+    const response = await handler(event('GET'));
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.bedrockMode).toBe('role');
+    expect(body.bedrockExternalIdSet).toBe(true);
+    expect(body.bedrockRoleArn).toBeUndefined();
+    expect(response.body).not.toContain(ROLE_ARN);
+    expect(response.body).not.toContain(EXTERNAL_ID);
   });
 });

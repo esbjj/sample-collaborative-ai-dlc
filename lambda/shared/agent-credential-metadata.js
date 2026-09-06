@@ -46,20 +46,43 @@ const invokeMetadataBroker = async (
 };
 
 export const readCredentialScopeStatusViaBroker = async (request, deps) => {
+  // `includeBindingDetail` defaults to FALSE so the fail-safe direction is the
+  // default: a caller must opt in to receiving tenant-identifying binding detail.
+  // Only a path gated to a principal that may modify the binding may opt in
+  // (specs/bedrock-iam-role-credential-mode: req-same-and-cross-account).
+  const { includeBindingDetail = false, ...brokerRequest } = request ?? {};
   const result = await invokeMetadataBroker(
     {
       action: AGENT_CREDENTIAL_METADATA_ACTIONS.READ_SCOPE_STATUS,
-      ...request,
+      ...brokerRequest,
     },
     deps,
   );
   if (!result.status || typeof result.status !== 'object' || Array.isArray(result.status)) {
     throw invalidMetadata('Agent credential metadata broker returned an invalid status');
   }
-  return {
+  // This is a trust boundary, so every field is coerced rather than spread:
+  // the broker's response shape is validated here, not assumed. Phase 2 adds the
+  // three mode-aware fields (req-configured-semantics); an unrecognised mode
+  // becomes null so a newer broker meeting an older reader degrades to "not
+  // configured" rather than rendering a mode the UI cannot interpret.
+  const mode = result.status.bedrockMode;
+  const status = {
     bedrockBearerTokenSet: result.status.bedrockBearerTokenSet === true,
     kiroApiKeySet: result.status.kiroApiKeySet === true,
+    bedrockMode: mode === 'bearer' || mode === 'role' ? mode : null,
+    bedrockExternalIdSet: result.status.bedrockExternalIdSet === true,
   };
+  // The role ARN is not a secret, but it is tenant-identifying and no
+  // lower-privilege surface needs it — GET /agents/settings is reachable by any
+  // authenticated user, so it must not carry which role a deployment assumes.
+  if (includeBindingDetail) {
+    status.bedrockRoleArn =
+      typeof result.status.bedrockRoleArn === 'string' && result.status.bedrockRoleArn
+        ? result.status.bedrockRoleArn
+        : null;
+  }
+  return status;
 };
 
 export const resolveEffectiveCredentialBindingsViaBroker = async (request, deps) => {

@@ -409,10 +409,16 @@ export const handler = async (event) => {
       }
       if (httpMethod === 'GET') {
         try {
+          // This route is gated to space owners and admins, who may also PUT the
+          // binding, so binding detail may be returned here
+          // (req-same-and-cross-account). The platform fallback is read WITHOUT
+          // detail: a space admin may see that the platform has a binding, but
+          // the platform binding is not theirs to edit.
           const [space, platformFallback] = await Promise.all([
             readCredentialScopeStatusViaBroker({
               source: 'space',
               projectId,
+              includeBindingDetail: true,
             }),
             readCredentialScopeStatusViaBroker({
               source: 'platform',
