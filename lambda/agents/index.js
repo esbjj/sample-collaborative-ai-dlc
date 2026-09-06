@@ -510,7 +510,14 @@ export const handler = async (event) => {
               projectId,
             }).catch(() => null),
           ]);
-          return response(200, { ...space, bedrockExternalId: spaceExternalId, platformFallback });
+          return response(200, {
+            ...space,
+            bedrockExternalId: spaceExternalId,
+            // A space owner writing a trust policy needs the principal to trust
+            // just as much as a platform admin does (req-same-and-cross-account).
+            bedrockBrokerRoleArn: process.env.CREDENTIAL_BROKER_ROLE_ARN || null,
+            platformFallback,
+          });
         } catch (error) {
           console.error('[space agent credentials] GET failed:', error.message);
           return response(500, { error: 'Failed to load space agent credentials' });
@@ -735,7 +742,15 @@ export const handler = async (event) => {
         // Return secrets as masked flags (never send the raw values to the browser)
         return response(200, {
           ...platformCredentialStatus,
-          ...(bindingEditable ? { bedrockExternalId: platformExternalId } : {}),
+          ...(bindingEditable
+            ? {
+                bedrockExternalId: platformExternalId,
+                // The principal a customer role must trust. Non-secret, and an
+                // operator cannot write a trust policy without it
+                // (req-same-and-cross-account).
+                bedrockBrokerRoleArn: process.env.CREDENTIAL_BROKER_ROLE_ARN || null,
+              }
+            : {}),
           cliModels,
           tierModels,
           deriveEnrichment,

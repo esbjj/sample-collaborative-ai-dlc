@@ -363,6 +363,14 @@ export const prepareBedrockBindingWrite = async (
         ...(randomBytes ? { randomBytes } : {}),
       })
     : null;
+  // dec-external-id-scope makes the external ID MANDATORY cross-account, so a
+  // cross-account binding must never be composed without one. The platform
+  // generates it, so reaching here means generation returned nothing — persisting
+  // the binding anyway would produce a confused-deputy exposure rather than a
+  // legible failure.
+  if (crossAccount && !externalId) {
+    throw invalidRoleBinding('A cross-account role binding requires an external ID');
+  }
   return {
     update: {
       ...update,

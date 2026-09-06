@@ -483,6 +483,7 @@ module "api" {
   agent_questions_table_name               = module.dynamodb.agent_questions_table_name
   agent_outputs_table_name                 = module.dynamodb.agent_outputs_table_name
   agents_lambda_role_arn                   = module.lambda.agents_orchestrator_role_arn
+  credential_broker_role_arn               = module.lambda.credential_broker_role_arn
   agentcore_runtime_arn                    = module.agentcore.runtime_arn
   agent_credential_grant_secret_param_name = aws_ssm_parameter.agent_credential_grant_secret.name
   environment_registry_table_name          = module.dynamodb.environment_registry_table_name

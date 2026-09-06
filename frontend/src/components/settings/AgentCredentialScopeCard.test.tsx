@@ -277,6 +277,29 @@ describe('AgentCredentialScopeCard bedrock role mode', () => {
     expect(screen.getByTestId('space-bedrock-external-id-value')).toBeInTheDocument();
   });
 
+  it('surfaces the broker principal an operator must trust', async () => {
+    getProjectCredentials.mockResolvedValue({
+      bedrockBearerTokenSet: false,
+      kiroApiKeySet: false,
+      bedrockMode: 'role',
+      bedrockRoleArn: ROLE_ARN,
+      bedrockBrokerRoleArn: 'arn:aws:iam::111122223333:role/collab-credential-broker-dev',
+      platformFallback: { bedrockBearerTokenSet: false, kiroApiKeySet: false },
+    });
+
+    render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);
+
+    // Without this the operator cannot write the trust policy at all, so it is
+    // shown rather than documented (req-same-and-cross-account).
+    await screen.findByTestId('space-bedrock-broker-role-value');
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: /Reveal Principal to trust/ }));
+    expect(
+      await screen.findByText('arn:aws:iam::111122223333:role/collab-credential-broker-dev'),
+    ).toBeInTheDocument();
+  });
+
   it('refuses a role ARN and a bearer token in the same save', async () => {
     const user = userEvent.setup();
     render(<AgentCredentialScopeCard scope="space" projectId="p-1" />);

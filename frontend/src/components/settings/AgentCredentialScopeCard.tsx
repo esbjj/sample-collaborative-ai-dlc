@@ -345,6 +345,14 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
                 secret is stored. Its trust policy must name this deployment&apos;s credential
                 broker.
               </p>
+              {settings?.bedrockBrokerRoleArn && (
+                <RevealableValue
+                  id={`${scope}-bedrock-broker-role`}
+                  label="Principal to trust"
+                  value={settings.bedrockBrokerRoleArn}
+                  helpText="The role's trust policy must allow sts:AssumeRole for this principal. Add an sts:RoleSessionName condition to limit which spaces may use the role."
+                />
+              )}
               {externalId && (
                 <RevealableValue
                   id={`${scope}-bedrock-external-id`}

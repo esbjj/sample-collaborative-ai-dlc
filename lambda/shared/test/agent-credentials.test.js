@@ -660,6 +660,26 @@ describe('bedrock external ID storage and cross-account detection', () => {
     expect(ssm.commandCalls(PutParameterCommand)).toHaveLength(0);
   });
 
+  it('refuses to compose a cross-account binding with no external ID', async () => {
+    // dec-external-id-scope makes it mandatory cross-account. Reaching this means
+    // generation returned nothing, and persisting anyway would trade a legible
+    // failure for a confused-deputy exposure.
+    ssm
+      .on(GetParameterCommand)
+      .rejects(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }));
+    ssm.on(PutParameterCommand).resolves({});
+
+    await expect(
+      prepareBedrockBindingWrite(ssm, {
+        base: BASE,
+        source: 'platform',
+        update: { bedrockBearerToken: JSON.stringify({ roleArn: OTHER_ACCOUNT }) },
+        platformAccountId: PLATFORM_ACCOUNT,
+        randomBytes: () => Buffer.alloc(0),
+      }),
+    ).rejects.toMatchObject({ code: 'BEDROCK_ROLE_BINDING_INVALID' });
+  });
+
   it('refuses a client-supplied external ID instead of silently replacing it', () => {
     // AWS requires the assuming party to control the value. Overwriting it
     // quietly would leave the operator with a trust policy they believe is right.

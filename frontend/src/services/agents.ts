@@ -82,6 +82,9 @@ export interface AgentCredentialStatus {
   /** The platform-generated external ID. Non-secret but tenant-identifying, so it
    *  is returned only on a gated read (dec-external-id-not-secret). */
   bedrockExternalId?: string | null;
+  /** The credential-broker role ARN a customer Bedrock role must trust. Non-secret,
+   *  and an operator cannot write a trust policy without it. */
+  bedrockBrokerRoleArn?: string | null;
 }
 
 export type BedrockCredentialMode = 'bearer' | 'role' | null;
@@ -126,6 +129,7 @@ export interface AgentSettings {
   bedrockRoleArn?: string | null;
   bedrockExternalIdSet?: boolean;
   bedrockExternalId?: string | null;
+  bedrockBrokerRoleArn?: string | null;
   /** Default runtime model overrides by supported CLI */
   cliModels?: CliModels;
   /** Agent tier → model configuration: judgment/balanced/templated rows plus
