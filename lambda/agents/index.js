@@ -44,6 +44,7 @@ import {
   AGENT_CREDENTIAL_PROVIDERS,
   credentialProviderForCli,
   credentialSourcesFromBindings,
+  validateCredentialScopeUpdate,
   writeCredentialScope,
 } from '../shared/agent-credentials.js';
 import {
@@ -376,6 +377,10 @@ export const handler = async (event) => {
         } catch {
           return response(400, { error: 'Invalid JSON body' });
         }
+        // Role bindings are rejected here by design: this endpoint is gated only
+        // on authentication, so any member could otherwise name a role ARN.
+        const invalid = validateCredentialScopeUpdate({ source: 'user', update: input });
+        if (invalid) return response(400, invalid);
         try {
           await writeCredentialScope(ssm, {
             base: credentialBase,
@@ -426,6 +431,8 @@ export const handler = async (event) => {
         } catch {
           return response(400, { error: 'Invalid JSON body' });
         }
+        const invalid = validateCredentialScopeUpdate({ source: 'space', update: input });
+        if (invalid) return response(400, invalid);
         try {
           await writeCredentialScope(ssm, {
             base: credentialBase,
@@ -628,6 +635,11 @@ export const handler = async (event) => {
       const errors = [];
 
       if (typeof input.bedrockBearerToken === 'string') {
+        // A role-shaped value must parse before it is stored: validation lives on
+        // the write path so a malformed binding can never reach a stage
+        // (specs/bedrock-iam-role-credential-mode: req-single-parameter-encoding).
+        const invalid = validateCredentialScopeUpdate({ source: 'platform', update: input });
+        if (invalid) return response(400, invalid);
         // Empty string clears the token (stored as literal "placeholder" sentinel)
         const value = input.bedrockBearerToken.trim() || 'placeholder';
         try {

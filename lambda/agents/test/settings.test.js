@@ -135,4 +135,85 @@ describe('personal agent credentials', () => {
       Name: '/collab/dev/users/user-1/agent-credentials/kiro-api-key',
     });
   });
+
+  // specs/bedrock-iam-role-credential-mode — req-role-credential-mode,
+  // dec-user-scope-role-deferred. This endpoint is gated only on authentication,
+  // so any member could otherwise name a role ARN for the platform to assume.
+  it('rejects a role binding at user scope without writing SSM', async () => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    const response = await handler(
+      personalEvent('PUT', {
+        bedrockBearerToken: JSON.stringify({
+          roleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+        }),
+      }),
+    );
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.body);
+    expect(body.code).toBe('BEDROCK_ROLE_SCOPE_UNSUPPORTED');
+    expect(body.error).toContain('user scope');
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('still accepts a bearer token at user scope', async () => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    const response = await handler(
+      personalEvent('PUT', { bedrockBearerToken: 'ABSKQmVkcm9jaw==' }),
+    );
+    expect(response.statusCode).toBe(200);
+    expect(ssmMock.commandCalls(PutParameterCommand)[0].args[0].input.Value).toBe(
+      'ABSKQmVkcm9jaw==',
+    );
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-single-parameter-encoding.
+// Validation lives on the write path so a malformed value can never reach a stage.
+describe('platform bedrock role binding', () => {
+  const ROLE_VALUE = JSON.stringify({
+    roleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+  });
+
+  it('stores a valid role binding in the existing bedrock parameter', async () => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    const response = await handler(
+      event('PUT', { bedrockBearerToken: ROLE_VALUE }, 'platform-admin'),
+    );
+    expect(response.statusCode).toBe(200);
+    // No new SSM path and no new IAM pattern: the same parameter, a different value.
+    expect(ssmMock.commandCalls(PutParameterCommand)[0].args[0].input).toMatchObject({
+      Name: '/collab/dev/bedrock-bearer-token',
+      Value: ROLE_VALUE,
+      Type: 'SecureString',
+      Overwrite: true,
+    });
+  });
+
+  it.each([
+    ['a non-IAM ARN', JSON.stringify({ roleArn: 'arn:aws:sts::111122223333:role/x' })],
+    ['a short account id', JSON.stringify({ roleArn: 'arn:aws:iam::123:role/x' })],
+    ['unparseable JSON', '{ "roleArn": '],
+    [
+      'an external id outside the STS charset',
+      JSON.stringify({
+        roleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+        externalId: 'has space',
+      }),
+    ],
+  ])('rejects %s with a 400 and writes nothing', async (_label, value) => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    const response = await handler(event('PUT', { bedrockBearerToken: value }, 'platform-admin'));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).code).toBe('BEDROCK_ROLE_BINDING_INVALID');
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
+  });
+
+  it('leaves the bearer path unchanged, including the placeholder clear', async () => {
+    ssmMock.on(PutParameterCommand).resolves({});
+    await handler(event('PUT', { bedrockBearerToken: 'ABSKQmVkcm9jaw==' }, 'platform-admin'));
+    await handler(event('PUT', { bedrockBearerToken: '' }, 'platform-admin'));
+    expect(
+      ssmMock.commandCalls(PutParameterCommand).map((call) => call.args[0].input.Value),
+    ).toEqual(['ABSKQmVkcm9jaw==', 'placeholder']);
+  });
 });
