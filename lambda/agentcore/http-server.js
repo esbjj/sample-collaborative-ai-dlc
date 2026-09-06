@@ -206,7 +206,7 @@ const main = async () => {
   const { materializeStage, renderRulesDoc } = await import('./stage-materializer.js');
   const { checkoutRepos } = await import('./workspace.js');
   const { discoverInstalledClis } = await import('./cli/discover.js');
-  const { authenticatedClisForEnv, resolveInvocationAgentAuth } =
+  const { authenticatedClisForProviders, resolveInvocationAgentAuth } =
     await import('./auth-resolver.js');
 
   const workspaceDir = process.env.V2_WORKSPACE_DIR || '/mnt/workspace';
@@ -222,7 +222,13 @@ const main = async () => {
     });
     return {
       ...auth,
-      availableClis: authenticatedClisForEnv({ installed: installedClis, env: auth.env }),
+      // A Bedrock role binding sets temporary AWS credentials and no bearer
+      // token, so availability must follow the RESOLVED providers, not the
+      // presence of a secret variable.
+      availableClis: authenticatedClisForProviders({
+        installed: installedClis,
+        resolvedProviders: auth.resolvedProviders,
+      }),
     };
   };
 
