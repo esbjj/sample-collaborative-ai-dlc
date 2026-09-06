@@ -4,19 +4,24 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SSMClient, GetParameterCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import {
   CREDENTIAL_ACTIVE_EXECUTION_STATUSES,
+  ROLE_SESSION_DURATION_SECONDS,
   authorizeAgentCredentialRequest,
   authorizeCredentialRequest,
   executionIncludesRepository,
+  loggableAgentCredentialErrorCode,
 } from '../index.js';
 import { signAgentCredentialGrant } from '../../shared/agent-credential-grants.js';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ssmMock = mockClient(SSMClient);
 const secretsMock = mockClient(SecretsManagerClient);
+const stsMock = mockClient(STSClient);
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ssm = new SSMClient({});
+const sts = new STSClient({});
 const secrets = new SecretsManagerClient({});
 
 describe('credential broker authorization', () => {
@@ -157,10 +162,12 @@ describe('agent credential grant authorization', () => {
       credentials: [
         {
           binding: { provider: 'bedrock', source: 'space' },
+          kind: 'bearer',
           value: 'bedrock-space',
         },
         {
           binding: { provider: 'kiro', source: 'user', userId: 'u-1' },
+          kind: 'bearer',
           value: 'kiro-user',
         },
       ],
@@ -197,6 +204,286 @@ describe('agent credential grant authorization', () => {
         },
       ),
     ).rejects.toMatchObject({ code: 'AGENT_CREDENTIAL_GRANT_INVALID' });
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(0);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-broker-side-assume,
+// req-broker-credential-resolution, req-session-name-attribution,
+// req-capabilities-authed.
+describe('bedrock role credential resolution', () => {
+  const SECRET = 'g'.repeat(48);
+  const NOW = Date.parse('2026-09-01T12:00:00.000Z');
+  const PROJECT_ID = 'aa11bb22-cc33-dd44-ee55-ff6677889900';
+  const ROLE_ARN = 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference';
+  const PLATFORM_PATH = '/app/dev/bedrock-bearer-token';
+  const STS_CREDENTIALS = {
+    AccessKeyId: 'ASIAEXAMPLEEXAMPLE',
+    SecretAccessKey: 'secret-access-key',
+    SessionToken: 'session-token',
+    Expiration: new Date('2026-09-01T13:00:00.000Z'),
+  };
+
+  const grantFor = (purpose, extra = {}) =>
+    signAgentCredentialGrant(
+      {
+        purpose,
+        projectId: PROJECT_ID,
+        bindings: [{ provider: 'bedrock', source: 'platform' }],
+        ...extra,
+      },
+      SECRET,
+      { now: () => NOW, randomId: () => 'grant-1234567890' },
+    );
+
+  const resolve = (grant) =>
+    authorizeAgentCredentialRequest(
+      { grant },
+      {
+        ssmClient: ssm,
+        stsClient: sts,
+        secret: SECRET,
+        env: { AGENT_SETTINGS_SSM_PREFIX: '/app/dev' },
+        now: () => NOW,
+      },
+    );
+
+  const storeValue = (value) => {
+    ssmMock.on(GetParameterCommand).callsFake((input) => ({
+      Parameter: input.Name === PLATFORM_PATH ? { Name: input.Name, Value: value } : undefined,
+    }));
+  };
+
+  beforeEach(() => {
+    ssmMock.reset();
+    stsMock.reset();
+    vi.stubEnv('AGENT_SETTINGS_SSM_PREFIX', '/app/dev');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('assumes the role read from SSM and returns a kind-discriminated result', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolves({ Credentials: STS_CREDENTIALS });
+
+    const result = await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    expect(result.credentials).toEqual([
+      {
+        binding: { provider: 'bedrock', source: 'platform' },
+        kind: 'role',
+        credentials: {
+          AccessKeyId: 'ASIAEXAMPLEEXAMPLE',
+          SecretAccessKey: 'secret-access-key',
+          SessionToken: 'session-token',
+          Expiration: '2026-09-01T13:00:00.000Z',
+        },
+      },
+    ]);
+    // No `value` field on a role entry: the resolver treats a valueless bearer
+    // entry as missing, which is why the discriminator exists.
+    expect(result.credentials[0]).not.toHaveProperty('value');
+  });
+
+  it('pins the AssumeRole input: session name, 3600s duration, and no Tags', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolves({ Credentials: STS_CREDENTIALS });
+
+    await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    const input = stsMock.commandCalls(AssumeRoleCommand)[0].args[0].input;
+    expect(input).toEqual({
+      RoleArn: ROLE_ARN,
+      RoleSessionName: `aidlc-${PROJECT_ID}`,
+      DurationSeconds: 3600,
+    });
+    // con-role-chaining-3600 is a hard STS ceiling, not a tuning knob.
+    expect(ROLE_SESSION_DURATION_SECONDS).toBe(3600);
+    // con-session-name-fits: 42 characters against the 64-character STS limit.
+    expect(input.RoleSessionName.length).toBeLessThanOrEqual(64);
+    // con-tagsession-required: any Tags would fail closed on a trust policy that
+    // omits sts:TagSession.
+    expect(input).not.toHaveProperty('Tags');
+  });
+
+  it('passes the external id when the binding carries one', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN, externalId: 'ext-0123456789' }));
+    stsMock.on(AssumeRoleCommand).resolves({ Credentials: STS_CREDENTIALS });
+
+    await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    expect(stsMock.commandCalls(AssumeRoleCommand)[0].args[0].input.ExternalId).toBe(
+      'ext-0123456789',
+    );
+  });
+
+  it('never accepts a role ARN from the request, only from SSM', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolves({ Credentials: STS_CREDENTIALS });
+
+    await authorizeAgentCredentialRequest(
+      {
+        grant: grantFor('execution', { executionId: 'e-1' }),
+        // Attacker-supplied fields on the event are ignored outright.
+        roleArn: 'arn:aws:iam::999988887777:role/attacker',
+        externalId: 'attacker-external-id',
+      },
+      {
+        ssmClient: ssm,
+        stsClient: sts,
+        secret: SECRET,
+        env: { AGENT_SETTINGS_SSM_PREFIX: '/app/dev' },
+        now: () => NOW,
+      },
+    );
+
+    const input = stsMock.commandCalls(AssumeRoleCommand)[0].args[0].input;
+    expect(input.RoleArn).toBe(ROLE_ARN);
+    expect(input.ExternalId).toBeUndefined();
+  });
+
+  it('answers a capabilities grant from the binding alone, with no AssumeRole', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+
+    const result = await resolve(grantFor('capabilities'));
+
+    expect(result.credentials).toEqual([
+      { binding: { provider: 'bedrock', source: 'platform' }, kind: 'role', usable: true },
+    ]);
+    // req-capabilities-authed: minting here would mean one AssumeRole per
+    // settings render, which AWS warns can exceed the STS request-rate quota.
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it('resolves a plain string as a bearer token without touching STS', async () => {
+    storeValue('ABSKQmVkcm9jaw==');
+
+    const result = await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    expect(result.credentials).toEqual([
+      {
+        binding: { provider: 'bedrock', source: 'platform' },
+        kind: 'bearer',
+        value: 'ABSKQmVkcm9jaw==',
+      },
+    ]);
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it('reports an unconfigured binding as kind null rather than failing', async () => {
+    storeValue('placeholder');
+
+    const result = await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    expect(result.credentials).toEqual([
+      { binding: { provider: 'bedrock', source: 'platform' }, kind: null, value: null },
+    ]);
+  });
+
+  it('rejects a malformed role value as BEDROCK_ROLE_BINDING_INVALID before calling STS', async () => {
+    storeValue('{"roleArn":"not-an-arn"}');
+
+    await expect(resolve(grantFor('execution', { executionId: 'e-1' }))).rejects.toMatchObject({
+      code: 'BEDROCK_ROLE_BINDING_INVALID',
+    });
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it.each([
+    ['AccessDenied', 'BEDROCK_ROLE_ASSUME_DENIED'],
+    ['AccessDeniedException', 'BEDROCK_ROLE_ASSUME_DENIED'],
+    ['ExpiredToken', 'BEDROCK_ROLE_ASSUME_DENIED'],
+    ['ThrottlingException', 'BEDROCK_ROLE_ASSUME_THROTTLED'],
+    ['TooManyRequestsException', 'BEDROCK_ROLE_ASSUME_THROTTLED'],
+    ['ValidationError', 'BEDROCK_ROLE_RESOLUTION_FAILED'],
+    ['SomethingUnexpected', 'BEDROCK_ROLE_RESOLUTION_FAILED'],
+  ])('maps an STS %s onto %s and leaks no provider text', async (stsErrorName, expectedCode) => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    const stsError = Object.assign(
+      new Error(
+        `User: arn:aws:sts::221035260218:assumed-role/broker/session is not authorized to perform: sts:AssumeRole on resource: ${ROLE_ARN}`,
+      ),
+      { name: stsErrorName },
+    );
+    stsMock.on(AssumeRoleCommand).rejects(stsError);
+
+    let thrown;
+    try {
+      await resolve(grantFor('execution', { executionId: 'e-1' }));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown.code).toBe(expectedCode);
+    // The allowlisted code is the only thing that may surface. STS messages name
+    // the caller session and the target role.
+    expect(thrown.message).not.toContain('assumed-role');
+    expect(thrown.message).not.toContain(ROLE_ARN);
+    expect(loggableAgentCredentialErrorCode(thrown)).toBe(expectedCode);
+  });
+
+  it('fails typed when STS returns no credentials', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolves({});
+
+    await expect(resolve(grantFor('execution', { executionId: 'e-1' }))).rejects.toMatchObject({
+      code: 'BEDROCK_ROLE_RESOLUTION_FAILED',
+    });
+  });
+
+  it('refuses to compose a session name without a project id', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    const grant = signAgentCredentialGrant(
+      {
+        purpose: 'execution',
+        executionId: 'e-1',
+        bindings: [{ provider: 'bedrock', source: 'platform' }],
+      },
+      SECRET,
+      { now: () => NOW, randomId: () => 'grant-1234567890' },
+    );
+
+    await expect(resolve(grant)).rejects.toMatchObject({
+      code: 'BEDROCK_ROLE_RESOLUTION_FAILED',
+    });
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it('keeps an unrelated failure on the generic broker code', () => {
+    expect(loggableAgentCredentialErrorCode(new Error('boom'))).toBe(
+      'AGENT_CREDENTIAL_BROKER_FAILED',
+    );
+  });
+
+  // req-grant-model-unchanged: the grant model is untouched, so a grant that
+  // expires before the broker can resolve it must surface as a typed failure
+  // rather than a silent hang — and must do so before any STS round trip.
+  it('surfaces an expired grant as an allowlisted code without calling STS', async () => {
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolves({ Credentials: STS_CREDENTIALS });
+    const grant = grantFor('execution', { executionId: 'e-1' });
+
+    let thrown;
+    try {
+      await authorizeAgentCredentialRequest(
+        { grant },
+        {
+          ssmClient: ssm,
+          stsClient: sts,
+          secret: SECRET,
+          env: { AGENT_SETTINGS_SSM_PREFIX: '/app/dev' },
+          // The 300s TTL has elapsed (con-grant-ttl-300), plus the clock skew.
+          now: () => NOW + 400_000,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(loggableAgentCredentialErrorCode(thrown)).toBe('AGENT_CREDENTIAL_GRANT_EXPIRED');
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
     expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(0);
   });
 });
