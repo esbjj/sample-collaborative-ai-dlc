@@ -354,6 +354,7 @@ module "lambda" {
   project_name                = var.project_name
   environment                 = var.environment
   lambda_vpc_scope            = var.lambda_vpc_scope
+  bedrock_assumable_role_arns = var.bedrock_assumable_role_arns
   application_url             = local.app_url
   vpc_id                      = module.networking.vpc_id
   private_subnet_ids          = module.networking.private_subnet_ids

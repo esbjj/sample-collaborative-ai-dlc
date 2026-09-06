@@ -982,6 +982,16 @@ resource "aws_iam_role_policy" "credential_broker" {
         ]
       },
       {
+        # Bedrock IAM-role credential mode: the broker is the ONE principal that
+        # may assume a customer's Bedrock role, so the number of principals able
+        # to do so stays at one and the AgentCore execution role gains nothing
+        # (specs/bedrock-iam-role-credential-mode: req-broker-side-assume,
+        # req-execution-role-no-bedrock, req-least-privilege-assume).
+        Effect   = "Allow"
+        Action   = ["sts:AssumeRole"]
+        Resource = var.bedrock_assumable_role_arns
+      },
+      {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
         Resource = [var.github_app_config_param_arn]
