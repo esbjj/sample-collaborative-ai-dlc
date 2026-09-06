@@ -65,7 +65,7 @@ export const AGENT_CLI_METADATA = {
       label: 'Codex on Bedrock model IDs',
       url: 'https://help.openai.com/en/articles/20001252-use-codex-with-amazon-bedrock',
     },
-    modelPlaceholder: 'openai.gpt-5.5',
+    modelPlaceholder: 'global.openai.gpt-5.6-sol',
   },
 } as const satisfies Record<AgentCli, AgentCliMetadata>;
 
