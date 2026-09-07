@@ -362,12 +362,14 @@ describe('AgentCredentialScopeCard bedrock role mode', () => {
     expect(screen.queryByLabelText('Role ARN')).not.toBeInTheDocument();
   });
 
-  it('offers no role method at personal scope', async () => {
+  it('offers no role method at personal scope, but still marks the token deprecated', async () => {
     render(<AgentCredentialScopeCard scope="personal" />);
-    await screen.findByLabelText(/Bedrock Bearer Token/);
     // That endpoint is gated only on authentication, so any member could otherwise
-    // name a role ARN (dec-user-scope-role-deferred).
+    // name a role ARN (dec-user-scope-role-deferred) — hence no radio here.
+    expect(await screen.findByLabelText(/Bedrock Bearer Token \(deprecated\)/)).toBeInTheDocument();
     expect(screen.queryByLabelText('IAM role')).not.toBeInTheDocument();
-    expect(screen.queryByText('Deprecated')).not.toBeInTheDocument();
+    // req-bearer-deprecated applies to every card. Naming WHERE the alternative
+    // lives is what makes it actionable for a user who cannot choose a role here.
+    expect(screen.getByText(/configured at space or platform scope/)).toBeInTheDocument();
   });
 });

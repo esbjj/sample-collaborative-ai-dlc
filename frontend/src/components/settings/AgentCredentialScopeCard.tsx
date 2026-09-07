@@ -471,7 +471,7 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
           {(!roleSupported || bedrockMethod === 'bearer') && (
             <SecretField
               id={`${scope}-bedrock-bearer-token`}
-              label={roleSupported ? 'Bearer token value' : 'Bedrock Bearer Token'}
+              label={roleSupported ? 'Bearer token value' : 'Bedrock Bearer Token (deprecated)'}
               isSet={bedrockMode === 'bearer'}
               value={bearerToken}
               onChange={setBearerToken}
@@ -480,7 +480,14 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
               onClear={() => clearSecret('bedrockBearerToken')}
               clearing={clearingSecret === 'bedrockBearerToken'}
               disabled={saving || clearingSecret !== null}
-              helpText={`Enables Claude Code, OpenCode and Codex.${fallbackText('bedrock') ?? ''}`}
+              helpText={`Enables Claude Code, OpenCode and Codex.${
+                // Personal scope has no role option (dec-user-scope-role-deferred), so
+                // the deprecation is stated with WHERE the alternative lives — marking
+                // it deprecated without naming an alternative would be unactionable.
+                roleSupported
+                  ? ''
+                  : ' Deprecated: a long-lived key stored as a secret. An IAM role needs none, and is configured at space or platform scope.'
+              }${fallbackText('bedrock') ?? ''}`}
             />
           )}
           <SecretField
