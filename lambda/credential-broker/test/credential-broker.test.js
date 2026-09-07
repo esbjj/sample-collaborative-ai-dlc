@@ -403,7 +403,7 @@ describe('bedrock role credential resolution', () => {
     storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
     const stsError = Object.assign(
       new Error(
-        `User: arn:aws:sts::221035260218:assumed-role/broker/session is not authorized to perform: sts:AssumeRole on resource: ${ROLE_ARN}`,
+        `User: arn:aws:sts::111122223333:assumed-role/broker/session is not authorized to perform: sts:AssumeRole on resource: ${ROLE_ARN}`,
       ),
       { name: stsErrorName },
     );

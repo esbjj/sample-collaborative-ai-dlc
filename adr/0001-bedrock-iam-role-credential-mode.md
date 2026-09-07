@@ -255,7 +255,7 @@ Both cards need a mode-aware notion of configured. Note also that `bedrockBearer
 
 ## 4. Probe results
 
-Three probes were run on 2026-09-06 against account `221035260218` / `eu-central-1`.
+Three probes were run on 2026-09-06 against a development account in `eu-central-1`.
 
 ### 4.1 Probe 1 — the role-chaining cap is real and the boundary is exactly 3600
 
