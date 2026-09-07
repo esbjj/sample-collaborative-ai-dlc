@@ -34,9 +34,9 @@ variable "bedrock_model" {
 }
 
 variable "codex_model" {
-  description = "Default Codex-on-Bedrock model id (exact openai.* id, e.g. openai.gpt-5.5) seeded into the cli-models SSM parameter (empty = none)"
+  description = "Default Codex-on-Bedrock model id seeded into the cli-models SSM parameter (empty = none). Must be a cross-Region inference profile id such as global.openai.gpt-5.6-sol: Codex uses the Bedrock Runtime OpenAI-compatible endpoint, which refuses a bare foundation-model id with \"on-demand throughput isn't supported\""
   type        = string
-  default     = "openai.gpt-5.5"
+  default     = "global.openai.gpt-5.6-sol"
 }
 
 variable "aidlc_repo_ref" {

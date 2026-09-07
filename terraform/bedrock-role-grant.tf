@@ -102,14 +102,31 @@ locals {
         }
       },
       {
-        # Codex only. con-codex-mantle: Codex 0.145.0 calls
-        # bedrock-mantle.<region>.api.aws/openai/v1/responses and needs
+        # Codex only. con-codex-runtime-provider: Codex >= 0.149.1 with
+        # model_provider = "amazon-bedrock-runtime" calls
+        # bedrock-runtime.<region>.amazonaws.com/openai/v1/responses. That
+        # OpenAI-compatible API authorizes bedrock:InvokeModel against the Region's
+        # implicit `project/default` resource IN ADDITION to the model, so without
+        # this statement every call fails 401 naming that exact resource — measured,
+        # with the model itself already allowed by the statements above.
+        #
+        # Not the same resource as CodexMantleInference below: that one is the
+        # legacy bedrock-mantle service's own project namespace.
+        Sid      = "CodexOpenAiCompatibleProject"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
+        Resource = ["arn:${data.aws_partition.current.partition}:bedrock:*:${local.bedrock_role_account}:project/default"]
+      },
+      {
+        # Codex only, LEGACY. con-codex-mantle: Codex 0.145.0 called
+        # bedrock-mantle.<region>.api.aws/openai/v1/responses and needed
         # bedrock-mantle:CreateInference; bedrock:InvokeModel does not authorize it.
         #
-        # Included so Codex works the moment its own defects are fixed. Codex is
-        # NOT verified end to end in v1 (con-codex-model-missing: mantle in
-        # eu-central-1 serves none of the model ids it needs), and no acceptance
-        # criterion depends on a successful Codex invocation (req-codex-scope).
+        # Retained because the Mantle endpoint remains supported and a pinned-version
+        # rollback must not also need an IAM change. The current pinned Codex uses
+        # the runtime provider above. Measured: Mantle in eu-central-1 serves NO
+        # model id (every id 404s, Anthropic included), which is why the provider
+        # moved rather than the Region.
         Sid      = "CodexMantleInference"
         Effect   = "Allow"
         Action   = ["bedrock-mantle:CreateInference"]

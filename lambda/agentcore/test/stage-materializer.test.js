@@ -597,7 +597,7 @@ describe('Codex config (per-stage CODEX_HOME)', () => {
       mcpEntry: '/opt/agentcore/mcp/index.js',
       scope: { executionId: 'e1', intentId: 'i1' },
     });
-    expect(toml).toContain('model_provider = "amazon-bedrock"');
+    expect(toml).toContain('model_provider = "amazon-bedrock-runtime"');
     expect(toml).toContain('approval_policy = "never"');
     expect(toml).toContain('sandbox_mode = "danger-full-access"');
     expect(toml).toContain('project_doc_fallback_filenames = [".aidlc/rules.md"]');
@@ -709,7 +709,7 @@ describe('Codex config (per-stage CODEX_HOME)', () => {
     expect(context.codexHome.startsWith(`${localRoot}${path.sep}`)).toBe(true);
     expect(context.codexHome).not.toContain(path.join('.aidlc', 'codex-home'));
     const toml = await readFile(path.join(context.codexHome, 'config.toml'), 'utf8');
-    expect(toml).toContain('model_provider = "amazon-bedrock"');
+    expect(toml).toContain('model_provider = "amazon-bedrock-runtime"');
     const agentsMd = await readFile(path.join(context.codexHome, 'AGENTS.md'), 'utf8');
     expect(agentsMd).toContain('.aidlc/rules.md');
     expect(agentsMd).toContain('.aidlc/codex-instructions');

@@ -182,19 +182,44 @@ it needs, so nothing here blocks it once the defects below are fixed. But **no a
 criterion in this spec depends on a successful Codex invocation**, and you should not expect a
 Codex stage to complete today.
 
-Two separate, reproduced defects:
+Two defects were reproduced here and both are now fixed; this section records what they were,
+because the symptom is easy to misread as a credential fault.
 
-1. **Codex calls the wrong endpoint.** Codex 0.145.0 with `model_provider = amazon-bedrock`
-   targets `https://bedrock-mantle.<region>.api.aws/openai/v1/responses`. AWS documents the
-   OpenAI-compatible endpoint as `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`.
-   The host it uses serves neither the bare model id nor a CRIS profile id, so a real stage
-   fails with `404 The model '<id>' does not exist` for both. Reproduced twice on live stages,
-   with the stage reason `cli_nonzero_exit` and never a `credential_*` reason — so this is
-   Codex's endpoint, not authorization.
-2. **GPT-5.6 on Bedrock is reachable only through a cross-Region inference profile.** The bare
-   `openai.gpt-5.6-sol` form does not resolve; `global.openai.gpt-5.6-sol` is the servable
-   form. The platform's model validator accepts the CRIS forms, so configuration is not the
-   blocker.
+1. **Codex used the wrong endpoint.** Codex 0.145.0 with `model_provider = amazon-bedrock`
+   targets `https://bedrock-mantle.<region>.api.aws/openai/v1/responses`. Measured: Mantle in
+   eu-central-1 serves **no** model id at all — every id 404s, Anthropic included — while
+   `us-east-1` serves the GPT-5.6 family. Overriding only that provider's `base_url` to the
+   runtime host does not work either: it still signs SigV4 for service `bedrock-mantle`, and
+   the runtime endpoint answers `401 Credential should be scoped to correct service: 'bedrock'`.
+   The fix is the separate `amazon-bedrock-runtime` provider, which requires Codex >= 0.149.1 —
+   hence the pinned version moved to 0.153.4.
+2. **GPT-5.6 is reachable only through a cross-Region inference profile.** On the runtime
+   endpoint the bare `openai.gpt-5.6-sol` is refused with `Invocation of model ID ... with
+   on-demand throughput isn't supported. Retry your request with the ID or ARN of an inference
+   profile`, so `global.openai.gpt-5.6-sol` is the servable form. Note this is the exact
+   opposite of Mantle, which wants the bare id — the endpoints disagree, so a model id is only
+   correct relative to a provider.
+
+The open design question in earlier drafts — whether the OpenAI-compatible path forces a
+Bedrock API key, which role mode deliberately does not provide — is **resolved: it does not**.
+The runtime provider signs SigV4 and resolves the standard credential chain from
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` with no `AWS_PROFILE` and no
+`~/.aws/config`, and takes its Region from `AWS_REGION`. Measured with broker-minted
+credentials, which reached authorization under the platform's own role session.
+
+That path needs one grant the model statements do not cover: `bedrock:InvokeModel` on
+`arn:aws:bedrock:<region>:<account>:project/default`, the resource the OpenAI-compatible APIs
+authorize against. Without it every call fails `401` naming that resource even though the model
+itself is allowed.
+
+### Data residency, which is a decision rather than a defect
+
+`global.` profiles route to commercial Regions worldwide, so Codex prompt content can leave the
+deployment's Region. There is no `eu.openai.*` profile — only `global.openai.gpt-5.6-{sol,
+terra,luna}` — so an EU-residency-constrained deployment cannot use GPT-5.6 on any route today.
+The endpoint, billing, quota and CloudWatch/CloudTrail records stay in the deployment Region
+either way. The Anthropic models behind Claude Code and OpenCode are unaffected: they use
+`eu.anthropic.*` profiles and stay in-Region.
 
 A third item is a design question rather than a defect: the OpenAI-compatible path
 authenticates with a Bedrock API key, and role mode deliberately sets no bearer token. AWS
