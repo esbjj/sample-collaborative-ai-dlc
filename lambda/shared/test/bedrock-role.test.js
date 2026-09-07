@@ -147,6 +147,26 @@ describe('bedrock role binding preflight', () => {
     expect(verdict.candidates.map((c) => c.candidate)).toContain('external-id-required-but-absent');
   });
 
+  it('derives cross-account from the same helper the write path uses', async () => {
+    sts.on(AssumeRoleCommand).rejects(denied());
+
+    // bedrockRoleIsCrossAccount treats an UNKNOWN platform account as
+    // cross-account, because a superfluous external ID is inert while a missing one
+    // is a hard denial. The preflight must inherit that direction rather than
+    // re-derive it: the opposite answer would tell the operator to REMOVE the
+    // sts:ExternalId condition the write path had just generated a value for.
+    const verdict = await preflightBedrockRoleBinding(
+      { roleArn: ROLE_ARN, projectId: 'p-1', assumableRoleArns: ALLOWLIST },
+      sts,
+    );
+
+    const absent = verdict.candidates.find(
+      (c) => c.candidate === 'external-id-required-but-absent',
+    );
+    expect(absent.detail).toContain('cross-account');
+    expect(absent.detail).not.toContain('must not require');
+  });
+
   it('distinguishes throttling from a rejection, since it is not a binding fault', async () => {
     sts.on(AssumeRoleCommand).rejects(throttled());
     const verdict = await preflightBedrockRoleBinding(
@@ -174,7 +194,7 @@ describe('bedrock role binding preflight', () => {
 });
 
 describe('assumable-role allowlist matching', () => {
-  it('treats * as the only metacharacter and anchors the match', () => {
+  it('honours IAM\u2019s two resource wildcards and anchors the match', () => {
     expect(roleArnMatchesAllowlist(ROLE_ARN, ALLOWLIST)).toBe(true);
     expect(roleArnMatchesAllowlist('arn:aws:iam::444455556666:role/aidlc-bedrock', ALLOWLIST)).toBe(
       false,
@@ -187,6 +207,19 @@ describe('assumable-role allowlist matching', () => {
       false,
     );
     expect(roleArnMatchesAllowlist(ROLE_ARN, ['*'])).toBe(true);
+  });
+
+  it('accepts ? as IAM\u2019s single-character wildcard, so the check cannot be stricter than the grant', () => {
+    // IAM resource ARNs take BOTH * and ?. A pattern IAM would admit must not be
+    // refused here: the verdict would reject a save that STS goes on to allow.
+    const suffixed = 'arn:aws:iam::111122223333:role/aidlc-bedrock-1';
+    expect(roleArnMatchesAllowlist(suffixed, ['arn:aws:iam::*:role/aidlc-bedrock-?'])).toBe(true);
+    // Exactly ONE character, not any run of them.
+    expect(
+      roleArnMatchesAllowlist('arn:aws:iam::111122223333:role/aidlc-bedrock-12', [
+        'arn:aws:iam::*:role/aidlc-bedrock-?',
+      ]),
+    ).toBe(false);
   });
 
   it('treats an unconfigured allowlist as unknown rather than deny-all', () => {

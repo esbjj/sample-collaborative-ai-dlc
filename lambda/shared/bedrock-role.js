@@ -11,6 +11,10 @@
 // name and the error classification in one module is what stops the preflight
 // drifting from the path it is supposed to predict.
 import { AssumeRoleCommand } from '@aws-sdk/client-sts';
+// The write path decides whether a binding is cross-account with this same
+// function, so the preflight must not re-derive it: two answers to one question is
+// how the guidance ends up contradicting the value that was actually stored.
+import { bedrockRoleIsCrossAccount } from './agent-credentials.js';
 
 // con-role-chaining-3600: the broker itself runs under an assumed role, so this
 // AssumeRole is role chaining and STS caps it at exactly 3600s. This is a
@@ -190,9 +194,12 @@ export const BEDROCK_PREFLIGHT_CAUSES = Object.freeze({
   UNAVAILABLE: 'unavailable',
 });
 
-// Match an ARN against the broker's assumable-role patterns, where `*` is the
-// only metacharacter (IAM resource semantics). Anchored, and every regex
-// metacharacter in the pattern is escaped, so a pattern can never widen itself.
+// Match an ARN against the broker's assumable-role patterns, using IAM's own
+// resource-wildcard semantics: `*` is any run of characters and `?` is exactly one
+// (reference_policies_elements_resource). Both are honoured so this check can only
+// ever agree with the grant it mirrors — a pattern IAM would admit must not be
+// refused here, or a legitimate binding is rejected at save time. Anchored, and
+// every OTHER regex metacharacter is escaped, so a pattern can never widen itself.
 export const roleArnMatchesAllowlist = (roleArn, patterns = []) => {
   const arn = String(roleArn || '');
   const list = (Array.isArray(patterns) ? patterns : [])
@@ -203,7 +210,11 @@ export const roleArnMatchesAllowlist = (roleArn, patterns = []) => {
   // be worse than letting STS answer.
   if (list.length === 0) return true;
   return list.some((pattern) => {
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
+    // `*` and `?` are deliberately left out of the escape class, then translated.
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replaceAll('*', '.*')
+      .replaceAll('?', '.');
     return new RegExp(`^${escaped}$`).test(arn);
   });
 };
@@ -268,9 +279,7 @@ export const preflightBedrockRoleBinding = async (
 ) => {
   // A platform binding has no single space, so it probes with PREFLIGHT_SESSION_NAME.
   const sessionName = projectId ? composeRoleSessionName(projectId) : PREFLIGHT_SESSION_NAME;
-  const crossAccount = Boolean(
-    platformAccountId && !String(roleArn || '').includes(`::${platformAccountId}:`),
-  );
+  const crossAccount = bedrockRoleIsCrossAccount({ roleArn, platformAccountId });
   if (!roleArnMatchesAllowlist(roleArn, assumableRoleArns)) {
     return {
       ok: false,

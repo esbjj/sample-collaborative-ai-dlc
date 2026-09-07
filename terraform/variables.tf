@@ -157,3 +157,55 @@ variable "route53_zone_id" {
   type        = string
   default     = ""
 }
+
+# ── Bedrock IAM-role credential mode ──
+# Consumed by bedrock-role-grant.tf, which renders the customer-side grant, the
+# trust policy and the session-policy ceiling from these three inputs.
+
+# The account that OWNS the Bedrock role. Defaults to this deployment's account,
+# which is the same-account case. For a central Bedrock account, set this to that
+# account id: every ARN in the grant must name the account owning the role, not
+# the platform account (req-model-grant-families).
+variable "bedrock_role_account_id" {
+  description = "AWS account id owning the Bedrock role the broker assumes. Defaults to this deployment's account (the same-account case)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.bedrock_role_account_id == "" || can(regex("^[0-9]{12}$", var.bedrock_role_account_id))
+    error_message = "bedrock_role_account_id must be a 12-digit AWS account id, or empty to use this deployment's account."
+  }
+}
+
+# See modules/api/lambda/variables.tf for the full rationale. Declared at root too
+# so an operator can set it in their .tfvars without reaching into a module.
+variable "bedrock_assumable_role_arns" {
+  description = "IAM role ARNs the credential broker may assume for Bedrock access. Path-scoped by default; set [\"*\"] to opt out of the naming convention."
+  type        = list(string)
+  default     = ["arn:aws:iam::*:role/aidlc-bedrock-*"]
+
+  validation {
+    condition     = length(var.bedrock_assumable_role_arns) > 0
+    error_message = "bedrock_assumable_role_arns must not be empty; the broker would be unable to resolve any role binding."
+  }
+}
+
+# Which spaces the rendered trust policy admits. EMPTY — the default — renders the
+# shared form every space can use, which is the only form a PLATFORM-SCOPE binding
+# can work with: a platform binding has no single space, so the broker's bind-time
+# preflight probes with the session name `aidlc-preflight`
+# (lambda/shared/bedrock-role.js), which a single-space StringEquals condition
+# rejects by design. Set this only for a SPACE-SCOPE binding, to the space ids from
+# the space URLs, and the policy narrows to exactly those sessions.
+variable "bedrock_role_trusted_space_ids" {
+  description = "Space (project) ids the rendered Bedrock trust policy admits. Empty renders the shared form required by a platform-scope binding; set ids only for space-scope bindings."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for id in var.bedrock_role_trusted_space_ids : can(regex("^[A-Za-z0-9._=,@-]{1,58}$", id))
+    ])
+    error_message = "Each id must be a space id as it appears in the space URL; sts:RoleSessionName caps the composed aidlc-<id> at 64 characters."
+  }
+}

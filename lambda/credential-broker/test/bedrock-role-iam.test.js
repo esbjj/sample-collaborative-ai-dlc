@@ -14,6 +14,8 @@ const read = (relative) => readFileSync(fileURLToPath(new URL(relative, import.m
 const brokerTerraform = read('../../../terraform/modules/api/lambda/main.tf');
 const brokerVariables = read('../../../terraform/modules/api/lambda/variables.tf');
 const grantTerraform = read('../../../terraform/bedrock-role-grant.tf');
+// The grant file's three inputs are declared with every other root variable.
+const rootVariables = read('../../../terraform/variables.tf');
 
 const terraformBlock = (source, header) => {
   const start = source.indexOf(header);
@@ -241,7 +243,7 @@ describe('Bedrock grant and session-policy ceiling are one definition', () => {
     });
 
     it('defaults to the shared form and narrows only when spaces are named', () => {
-      const variable = terraformBlock(grantTerraform, 'variable "bedrock_role_trusted_space_ids"');
+      const variable = terraformBlock(rootVariables, 'variable "bedrock_role_trusted_space_ids"');
       expect(variable).toContain('default     = []');
       expect(shared).toContain('StringLike');
       expect(spaces).toContain('StringEquals');
