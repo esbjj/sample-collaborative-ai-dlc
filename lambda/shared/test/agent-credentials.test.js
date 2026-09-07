@@ -8,7 +8,9 @@ import {
   SSMClient,
 } from '@aws-sdk/client-ssm';
 import {
+  AGENT_CLI_PROVIDER,
   AGENT_CREDENTIAL_ENV_NAMES,
+  AGENT_CREDENTIAL_PROVIDERS,
   AWS_TEMPORARY_CREDENTIAL_ENV_NAMES,
   EXTERNAL_ID_ENTROPY_BYTES,
   agentCredentialPath,
@@ -700,5 +702,29 @@ describe('bedrock external ID storage and cross-account detection', () => {
         update: { bedrockBearerToken: JSON.stringify({ roleArn: OTHER_ACCOUNT }) },
       }),
     ).toBe(null);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-litellm-seam.
+//
+// The constraining seam for a future non-AWS provider is this static map, not the
+// credential mechanism. A bearer token and an IAM role are two shapes of ONE
+// provider's stored value, so neither may appear here — a `bedrock-role` entry
+// would make the mode part of the provider identity and force every consumer to
+// learn about it.
+describe('the CLI-to-provider map stays mode-agnostic', () => {
+  it('maps each CLI to a provider name carrying no credential mode', () => {
+    expect(AGENT_CLI_PROVIDER).toStrictEqual({
+      kiro: 'kiro',
+      claude: 'bedrock',
+      opencode: 'bedrock',
+      codex: 'bedrock',
+    });
+    // LiteLLM will arrive as a new provider BESIDE kiro, so the provider set is
+    // what grows — never the mode vocabulary inside a provider.
+    expect(AGENT_CREDENTIAL_PROVIDERS).toStrictEqual(['bedrock', 'kiro']);
+    for (const provider of Object.values(AGENT_CLI_PROVIDER)) {
+      expect(provider).not.toMatch(/role|bearer|sts|token/i);
+    }
   });
 });

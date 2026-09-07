@@ -629,3 +629,108 @@ describe('resolveInvocationAgentAuth on the Bedrock role path', () => {
     expect(result.resolvedProviders).toEqual(['bedrock']);
   });
 });
+
+// specs/bedrock-iam-role-credential-mode — req-credential-safety.
+//
+// A live scan of the runtime, broker and metadata log groups after a real stage run
+// found zero credential material, but that is a point-in-time observation of one
+// deployment. This asserts the property at the source: nothing the resolver writes
+// to a log stream may carry a credential value, whatever the broker returns.
+describe('role-path resolution logs no credential material', () => {
+  const bedrockBinding = { provider: 'bedrock', source: 'platform' };
+  const SECRETS = {
+    AccessKeyId: 'ASIALOGPROBEEXAMPLE',
+    SecretAccessKey: 'secret-log-probe-value',
+    SessionToken: 'session-log-probe-value',
+    Expiration: '2026-09-06T09:53:40.000Z',
+  };
+
+  it('writes names, never values, on every console channel', async () => {
+    const written = [];
+    const capture = (...args) => written.push(args.map((a) => String(a)).join(' '));
+    const spies = ['log', 'info', 'warn', 'error', 'debug'].map((level) =>
+      vi.spyOn(console, level).mockImplementation(capture),
+    );
+    try {
+      const result = await resolveInvocationAgentAuth({
+        payload: {
+          command: 'run-stage',
+          executionId: 'e1',
+          requestedCli: 'claude',
+          agentCredentialGrant: 'grant-role',
+        },
+        store: {
+          getExecution: async () => ({
+            projectId: 'p-1',
+            agentCli: 'claude',
+            credentialBinding: bedrockBinding,
+          }),
+        },
+        env: { AGENT_SETTINGS_SSM_PREFIX: '/app/dev' },
+        broker: async () => ({
+          purpose: 'execution',
+          projectId: 'p-1',
+          executionId: 'e1',
+          credentials: [{ binding: bedrockBinding, kind: 'role', credentials: SECRETS }],
+        }),
+      });
+      // The credentials really were resolved, so this is not passing vacuously.
+      expect(result.env.AWS_SESSION_TOKEN).toBe(SECRETS.SessionToken);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+
+    const transcript = written.join('\n');
+    for (const value of [SECRETS.AccessKeyId, SECRETS.SecretAccessKey, SECRETS.SessionToken]) {
+      expect(transcript).not.toContain(value);
+    }
+  });
+
+  it('leaves the reserved MCP bridge with no Bedrock credentials when resolution produced nothing', async () => {
+    // The reserved `aidlc` bridge is the ONLY child meant to see the credential
+    // chain, and it inherits it from the CLI process environment. So when
+    // resolution produced nothing, the child must find nothing — there is no
+    // second path by which it could reach Bedrock, and the container's own
+    // execution role deliberately holds no bedrock permission.
+    const result = await resolveInvocationAgentAuth({
+      payload: {
+        command: 'run-stage',
+        executionId: 'e1',
+        requestedCli: 'claude',
+        agentCredentialGrant: 'grant-role',
+      },
+      store: {
+        getExecution: async () => ({
+          projectId: 'p-1',
+          agentCli: 'claude',
+          credentialBinding: bedrockBinding,
+        }),
+      },
+      // Stale values from a previous invocation must be scrubbed, or the child
+      // would inherit a credential this invocation was never granted.
+      env: {
+        AGENT_SETTINGS_SSM_PREFIX: '/app/dev',
+        AWS_ACCESS_KEY_ID: 'ASIASTALEFROMPRIOR',
+        AWS_SECRET_ACCESS_KEY: 'stale-secret',
+        AWS_SESSION_TOKEN: 'stale-session',
+        AWS_BEARER_TOKEN_BEDROCK: 'stale-bearer',
+      },
+      broker: async () => ({
+        purpose: 'execution',
+        projectId: 'p-1',
+        executionId: 'e1',
+        credentials: [{ binding: bedrockBinding, kind: null, value: null }],
+      }),
+    });
+
+    expect(result.missingProviders).toEqual(['bedrock']);
+    for (const name of [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_BEARER_TOKEN_BEDROCK',
+    ]) {
+      expect(result.env[name]).toBeUndefined();
+    }
+  });
+});
