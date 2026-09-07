@@ -473,6 +473,12 @@ decisions:
     consequences: >-
       The design is not published with the product documentation until someone decides it should be.
       Anything written under .kiro/ would be uncommittable and therefore invisible to a contribution.
+      AMENDED once role mode shipped: the published docs asserted "token auth is the only path" in
+      four places, which this decision does not license, and an operator could not set a role up
+      from published documentation at all. The operator PROCEDURE is therefore now published as
+      docs/getting-started/bedrock-credentials.md with a zensical.toml nav entry, and the
+      trust-policy templates moved there so only one copy exists. The spec set and the ADR stay
+      outside docs/ as originally decided - publishing a runbook is not publishing a design.
 ```
 
 Every decision is now accepted. The five previously-open items were resolved by verification rather than by preference: `dec-user-scope-role-deferred` and `dec-session-name-contract` follow from `con-user-scope-self-service` and `con-session-name-condition`; `dec-binding-preflight` from `con-broker-action-dispatch` making it cheap; `req-expiry-tripwire` from `con-stage-reason-structured` making it nearly free; and `dec-external-id-not-secret` from AWS's own documented position, which reversed the "never returned" property this spec originally asserted. The remaining judgement call is `dec-assumable-role-default`, which is a naming convention the central Bedrock team can override by setting the variable.
