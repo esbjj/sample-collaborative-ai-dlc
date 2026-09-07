@@ -174,13 +174,11 @@ The distinction lives entirely inside the stored value, never in the provider na
 non-AWS provider (LiteLLM, with an API key and base URL) arrives as a new provider beside
 `kiro` rather than as a third Bedrock mode.
 
-## Codex on Bedrock is not verified end to end
+## Codex on Bedrock
 
-Codex's **credential path works** — role-mode credentials are delivered to it exactly as to
-Claude Code and OpenCode, and its grant includes the `bedrock-mantle:CreateInference` statement
-it needs, so nothing here blocks it once the defects below are fixed. But **no acceptance
-criterion in this spec depends on a successful Codex invocation**, and you should not expect a
-Codex stage to complete today.
+Codex runs end to end on role-mode credentials: four consecutive stages at `exitCode=0` on
+`global.openai.gpt-5.6-sol`, parking at a human gate, verified in dev on Codex 0.153.4. It took
+a provider change, a version bump, a model-id change and one extra grant to get there.
 
 Two defects were reproduced here and both are now fixed; this section records what they were,
 because the symptom is easy to misread as a credential fault.
@@ -195,8 +193,8 @@ because the symptom is easy to misread as a credential fault.
    hence the pinned version moved to 0.153.4.
 2. **GPT-5.6 is reachable only through a cross-Region inference profile.** On the runtime
    endpoint the bare `openai.gpt-5.6-sol` is refused with `Invocation of model ID ... with
-   on-demand throughput isn't supported. Retry your request with the ID or ARN of an inference
-   profile`, so `global.openai.gpt-5.6-sol` is the servable form. Note this is the exact
+on-demand throughput isn't supported. Retry your request with the ID or ARN of an inference
+profile`, so `global.openai.gpt-5.6-sol` is the servable form. Note this is the exact
    opposite of Mantle, which wants the bare id — the endpoints disagree, so a model id is only
    correct relative to a provider.
 
