@@ -48,6 +48,28 @@ Two things to know before reacting to a count of one or two:
   single attempt to run for 8 hours, so a stage legitimately exceeding one hour is possible
   and is exactly the case `credential_expired` exists to report legibly.
 
+### How the reason is decided, and which way it errs
+
+Two independent signals, either of which files the failure as `credential_expired`:
+
+1. **The credential's own deadline.** The broker returns an expiry with every minted
+   credential, so a non-zero CLI exit that happens after that instant is attributed to expiry
+   by arithmetic.
+2. **The CLI's stderr**, matched against known expiry wordings (`ExpiredToken`, "the security
+   token included in the request is expired", and similar).
+
+The deadline check exists because the second signal depends on wording the platform does not
+control: a CLI that reports expiry as a bare `403`, or phrases it differently after an
+upgrade, would otherwise be filed as `credential_invalid` or `cli_nonzero_exit` — and the
+counter would under-report the very thing it exists to measure.
+
+**The counter therefore errs toward over-attribution.** A stage that failed for an unrelated
+reason after its credential had expired is counted. That direction is deliberate: a false
+positive costs a look at a decision that should be revisited on evidence anyway, while a false
+negative leaves the no-refresh decision resting on an assumption nobody rechecked. When
+investigating a non-zero count, check the stage's own stderr before concluding the credential
+was the cause.
+
 ## Reading a resolution failure
 
 The broker returns an allowlisted code and never provider text, because an STS or SSM message

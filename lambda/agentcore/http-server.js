@@ -264,6 +264,10 @@ const main = async () => {
           availableClis: context.availableClis,
           credentialBindings: context.credentialBindings,
           missingCredentialBindings: context.missingCredentialBindings,
+          // The deadline on this invocation's temporary credentials, so a stage
+          // failure after it passed is attributed to expiry deterministically
+          // rather than by matching a CLI's stderr wording (req-expiry-tripwire).
+          credentialExpiresAt: context.credentialExpiresAt,
           broadcast,
           env: context.env,
         },

@@ -288,6 +288,8 @@ requirements:
       why this replaced an earlier proposal to count stage attempts over a duration threshold.
     acceptance_criteria:
       - THE SYSTEM SHALL make the credential_expired reason countable over a time window without a bespoke log query
+      - THE SYSTEM SHALL classify a stage failure that occurs after the resolved credential's own deadline as credential_expired, so the count does not depend on a CLI's stderr wording, which the platform does not control
+      - THE SYSTEM SHALL accept that this can over-attribute a failure that happened after the deadline for an unrelated reason, because a false positive prompts a review while a false negative hides the evidence the decision rests on
       - THE SYSTEM SHALL document a non-zero count as the trigger to revisit dec-v1-no-refresh
       - THE SYSTEM SHALL state the trigger in the runbook, so the decision is revisited on evidence rather than after an incident
       - THE SYSTEM SHALL introduce no new telemetry pipeline, metric namespace or duration histogram for this

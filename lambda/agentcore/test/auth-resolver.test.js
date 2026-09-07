@@ -515,6 +515,10 @@ describe('resolveInvocationAgentAuth on the Bedrock role path', () => {
     expect(result.env.AWS_ACCESS_KEY_ID).toBe('ASIAEXAMPLEEXAMPLE');
     expect(result.env.AWS_SECRET_ACCESS_KEY).toBe('secret-access-key');
     expect(result.env.AWS_SESSION_TOKEN).toBe('session-token');
+    // req-expiry-tripwire: the deadline is carried out of the resolver so a stage
+    // failure can be attributed to expiry by arithmetic rather than by matching a
+    // CLI's stderr wording.
+    expect(result.credentialExpiresAt).toBe('2026-09-06T09:53:40.000Z');
     // req-credential-safety: the bearer variable is never set on the role path.
     expect(result.env.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined();
     expect(result.resolvedProviders).toEqual(['bedrock']);

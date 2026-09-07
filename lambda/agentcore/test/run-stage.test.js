@@ -1651,6 +1651,76 @@ describe('runStage — fresh run persists the CLI session + parks on a pending g
     expect(failedEvent?.[1].summary).not.toContain('security token');
   });
 
+  // req-expiry-tripwire. The stderr check above depends on wording the platform
+  // does not control, so the counter that gates dec-v1-no-refresh would under-count
+  // whenever a CLI phrases expiry differently. The credential's own deadline is
+  // arithmetic and needs no cooperation from the CLI.
+  it('reports credential_expired from the credential deadline even when stderr says nothing about it', async () => {
+    const deps = baseDeps({
+      spawnFn: () => ({
+        on: (ev, cb) => ev === 'close' && setImmediate(() => cb(1)),
+        stdin: { end() {} },
+        stderr: {
+          on: (ev, cb) => {
+            // A bare 403 with no expiry wording at all — exactly the case the
+            // stderr patterns miss. Note it does not match the generic credential
+            // patterns either, so without the deadline this is cli_nonzero_exit.
+            if (ev === 'data') cb(Buffer.from('Error: request failed with status 500'));
+          },
+        },
+      }),
+    });
+
+    const res = await runStage(baseArgs, {
+      ...deps,
+      // Minted an hour ago, so the deadline is in the past by the time the CLI exits.
+      credentialExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    expect(res).toMatchObject({ ok: false, reason: 'credential_expired' });
+  });
+
+  it('does not attribute a failure to expiry while the credential is still valid', async () => {
+    // The load-bearing negative: a genuine agent failure inside the credential's
+    // lifetime must stay cli_nonzero_exit, or every failure would be miscounted.
+    const deps = baseDeps({
+      spawnFn: () => ({
+        on: (ev, cb) => ev === 'close' && setImmediate(() => cb(1)),
+        stdin: { end() {} },
+        stderr: {
+          on: (ev, cb) => {
+            if (ev === 'data') cb(Buffer.from('Error: request failed with status 500'));
+          },
+        },
+      }),
+    });
+
+    const res = await runStage(baseArgs, {
+      ...deps,
+      credentialExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    expect(res.reason).toBe('cli_nonzero_exit');
+  });
+
+  it('is inert for a bearer binding, which carries no deadline', async () => {
+    const deps = baseDeps({
+      spawnFn: () => ({
+        on: (ev, cb) => ev === 'close' && setImmediate(() => cb(1)),
+        stdin: { end() {} },
+        stderr: {
+          on: (ev, cb) => {
+            if (ev === 'data') cb(Buffer.from('Error: request failed with status 500'));
+          },
+        },
+      }),
+    });
+
+    const res = await runStage(baseArgs, { ...deps, credentialExpiresAt: null });
+
+    expect(res.reason).toBe('cli_nonzero_exit');
+  });
+
   it('treats a Kiro empty-final-completion crash as success (work already done)', async () => {
     // kiro-cli exits non-zero after the turn's work because it ended with an
     // empty final message; its ACP reports "Kiro failed to generate a response".

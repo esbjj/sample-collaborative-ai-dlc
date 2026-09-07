@@ -184,6 +184,9 @@ export const resolveInvocationAgentAuth = async ({
   const resolvedProviders = [];
   const missingProviders = [];
   const missingCredentialBindings = [];
+  // The earliest deadline among the resolved temporary credentials, as an epoch ms.
+  // Stays null for a bearer binding, which never expires.
+  let earliestExpiry = null;
   if (bindings.length === 0) {
     return {
       env: invocationEnv,
@@ -191,6 +194,7 @@ export const resolveInvocationAgentAuth = async ({
       resolvedProviders,
       missingProviders,
       missingCredentialBindings,
+      credentialExpiresAt: null,
     };
   }
   if (!payload.agentCredentialGrant) {
@@ -247,8 +251,9 @@ export const resolveInvocationAgentAuth = async ({
       source: binding.source,
     };
     credentialBindings.push(credentialBinding);
+    const entry = authorized.get(bindingKey(binding));
     const usable = applyAuthorizedCredential({
-      entry: authorized.get(bindingKey(binding)),
+      entry,
       binding,
       invocationEnv,
       authMode,
@@ -259,6 +264,16 @@ export const resolveInvocationAgentAuth = async ({
       continue;
     }
     resolvedProviders.push(binding.provider);
+    // req-expiry-tripwire: the deadline a temporary credential carries is the ONLY
+    // deterministic expiry signal available to the runtime — the credential is
+    // consumed inside the agent CLI subprocess, so everything else is that CLI's
+    // stderr wording, which the platform does not control. Carrying it lets a
+    // stage failure be attributed to expiry by arithmetic rather than by matching
+    // a phrase. The EARLIEST deadline wins when several providers resolve.
+    const expiresAt = Date.parse(entry?.credentials?.Expiration ?? '');
+    if (Number.isFinite(expiresAt) && (earliestExpiry === null || expiresAt < earliestExpiry)) {
+      earliestExpiry = expiresAt;
+    }
   }
 
   return {
@@ -267,5 +282,7 @@ export const resolveInvocationAgentAuth = async ({
     resolvedProviders,
     missingProviders,
     missingCredentialBindings,
+    // ISO string or null. Null for a bearer binding, which carries no deadline.
+    credentialExpiresAt: earliestExpiry === null ? null : new Date(earliestExpiry).toISOString(),
   };
 };
