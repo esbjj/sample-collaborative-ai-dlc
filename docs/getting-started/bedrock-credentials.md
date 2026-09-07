@@ -3,10 +3,10 @@
 Claude Code, OpenCode and Codex reach Amazon Bedrock through a credential you configure in the
 platform. There are two modes, and a scope holds one or the other:
 
-| Mode                     | What is stored                     | Lifetime                          |
-| ------------------------ | ---------------------------------- | --------------------------------- |
-| **IAM role** (preferred) | An IAM role ARN                    | Credentials minted per invocation, one hour |
-| **Bearer token** (deprecated) | An Amazon Bedrock API key     | Until you rotate it               |
+| Mode                          | What is stored            | Lifetime                                    |
+| ----------------------------- | ------------------------- | ------------------------------------------- |
+| **IAM role** (preferred)      | An IAM role ARN           | Credentials minted per invocation, one hour |
+| **Bearer token** (deprecated) | An Amazon Bedrock API key | Until you rotate it                         |
 
 In role mode the platform stores no secret at all. A credential broker assumes the role you name
 for each agent invocation and passes the resulting short-lived credentials to the CLI as
@@ -20,11 +20,11 @@ reaching an agent is always scoped and short-lived.
 
 ## Which mode is available where
 
-| Scope                                    | IAM role | Bearer token |
-| ---------------------------------------- | -------- | ------------ |
-| **Platform** (Admin → Agents)            | Yes      | Yes          |
-| **Space** (Space Settings → Agent)       | Yes      | Yes          |
-| **Personal** (Account Settings)          | No       | Yes          |
+| Scope                              | IAM role | Bearer token |
+| ---------------------------------- | -------- | ------------ |
+| **Platform** (Admin → Agents)      | Yes      | Yes          |
+| **Space** (Space Settings → Agent) | Yes      | Yes          |
+| **Personal** (Account Settings)    | No       | Yes          |
 
 Personal scope is bearer-only by design: that endpoint is gated on authentication alone, so any
 member could otherwise name an arbitrary role ARN for the platform to assume.
@@ -91,10 +91,20 @@ rather than shown once and discarded.
 
 ## Trust policy templates
 
-### One role scoped to one space
+Render the document rather than retyping one, so the broker principal and the
+session-name condition come from the deployment instead of from a placeholder:
 
-Recommended. The `sts:RoleSessionName` condition is the only control that makes a shared Bedrock
-role space-aware, and it needs no platform code.
+```bash
+terraform -chdir=terraform output -raw bedrock_role_trust_policy_json
+```
+
+**Which template you need is decided by the binding's scope, not by preference.**
+A platform-scope binding is used by every space, so its trust policy has to admit
+every space. A space-scope binding can be pinned to one.
+
+### A platform-scope binding: one role, every space
+
+What the output above renders by default.
 
 ```json
 {
@@ -107,8 +117,8 @@ role space-aware, and it needs no platform code.
       },
       "Action": "sts:AssumeRole",
       "Condition": {
-        "StringEquals": {
-          "sts:RoleSessionName": "aidlc-<projectId>"
+        "StringLike": {
+          "sts:RoleSessionName": "aidlc-*"
         }
       }
     }
@@ -116,25 +126,34 @@ role space-aware, and it needs no platform code.
 }
 ```
 
-Substitute the broker role ARN from the Terraform output, and `<projectId>` with the space id from
-the space URL.
+A single-space `StringEquals` condition on a platform-scope binding denies every
+space but the one named, and it is denied at credential resolution — the first
+stage of a run fails, not the save. The bind-time preflight catches it, because a
+platform binding has no single space to name and probes with the session name
+`aidlc-preflight`, which this condition admits and a single-space one does not.
 
-### One role shared by several spaces
+### A space-scope binding: one role, one space
 
-`StringLike` accepts a pattern; `StringEquals` also accepts an array, which is preferable when the
-set of spaces is small and closed.
+`StringEquals` also accepts an array, which is preferable to a pattern when the
+set of spaces is small and closed. Set `bedrock_role_trusted_space_ids` in your
+`.tfvars` and the output renders this form.
 
 ```json
 {
   "Condition": {
-    "StringLike": {
-      "sts:RoleSessionName": "aidlc-*"
+    "StringEquals": {
+      "sts:RoleSessionName": "aidlc-<projectId>"
     }
   }
 }
 ```
 
+Substitute `<projectId>` with the space id from the space URL.
+
 ### Cross-account, with the external ID
+
+The external ID is generated per binding when the binding is saved, so Terraform
+cannot render it. Add this condition by hand, using the value the save returns.
 
 ```json
 {
@@ -208,24 +227,24 @@ Codex needs more than a credential, because it does not use the Bedrock-native A
 
 ## Troubleshooting
 
-| Symptom                                                        | Cause                                                                            |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Save rejected, `role-not-allowlisted`                          | The ARN does not match `bedrock_assumable_role_arns`; rename the role or override the variable |
-| Save rejected, `trust-policy-rejected`                         | One of: untrusted principal, session-name mismatch, wrong or missing external ID, or the role does not exist. STS cannot distinguish these |
-| Save rejected but returns an external ID                      | Expected on the first cross-account save. Add it to the trust policy and save again |
-| Stage fails `credential_expired`                              | The stage outran its one-hour credential. Retry re-runs the attempt               |
-| Stage fails `credential_resolution_failed`                     | The broker could not mint a credential; check the binding still exists            |
-| Codex fails within seconds, `cli_nonzero_exit`                 | Usually the model id or the `project/default` grant, not the credential           |
-| `401 ... not authorized to perform: bedrock:InvokeModel on ... project/default` | The role's permission policy predates the Codex OpenAI-compatible grant; re-apply the emitted policy |
+| Symptom                                                                         | Cause                                                                                                                                      |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Save rejected, `role-not-allowlisted`                                           | The ARN does not match `bedrock_assumable_role_arns`; rename the role or override the variable                                             |
+| Save rejected, `trust-policy-rejected`                                          | One of: untrusted principal, session-name mismatch, wrong or missing external ID, or the role does not exist. STS cannot distinguish these |
+| Save rejected but returns an external ID                                        | Expected on the first cross-account save. Add it to the trust policy and save again                                                        |
+| Stage fails `credential_expired`                                                | The stage outran its one-hour credential. Retry re-runs the attempt                                                                        |
+| Stage fails `credential_resolution_failed`                                      | The broker could not mint a credential; check the binding still exists                                                                     |
+| Codex fails within seconds, `cli_nonzero_exit`                                  | Usually the model id or the `project/default` grant, not the credential                                                                    |
+| `401 ... not authorized to perform: bedrock:InvokeModel on ... project/default` | The role's permission policy predates the Codex OpenAI-compatible grant; re-apply the emitted policy                                       |
 
 ## Where values are stored
 
 All in AWS Systems Manager Parameter Store:
 
-| Value                    | Path                                                              | Type         |
-| ------------------------ | ----------------------------------------------------------------- | ------------ |
-| Bedrock binding (either mode) | `/<project>/<env>/…/agent-credentials/bedrock-bearer-token`   | SecureString |
-| External ID              | `/<project>/<env>/…/bedrock-external-id`                          | String       |
+| Value                         | Path                                                        | Type         |
+| ----------------------------- | ----------------------------------------------------------- | ------------ |
+| Bedrock binding (either mode) | `/<project>/<env>/…/agent-credentials/bedrock-bearer-token` | SecureString |
+| External ID                   | `/<project>/<env>/…/bedrock-external-id`                    | String       |
 
 The Bedrock parameter name is historical: it holds a bearer token in bearer mode and a JSON object
 such as `{"roleArn":"arn:aws:iam::111122223333:role/aidlc-bedrock-inference"}` in role mode. The

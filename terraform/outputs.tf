@@ -405,6 +405,11 @@ output "bedrock_role_grant_policy_json" {
   value       = jsonencode(local.bedrock_role_grant_policy)
 }
 
+output "bedrock_role_trust_policy_json" {
+  description = "Trust policy to attach to the Bedrock role the broker assumes. Shared across every space by default; set bedrock_role_trusted_space_ids to narrow it to named spaces."
+  value       = local.bedrock_role_trust_policy_json
+}
+
 output "bedrock_assumable_role_arns" {
   description = "The sts:AssumeRole resource the broker is granted. Path-scoped by default; a role named outside this set cannot be used."
   value       = var.bedrock_assumable_role_arns

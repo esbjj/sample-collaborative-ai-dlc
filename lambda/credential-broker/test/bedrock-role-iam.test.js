@@ -196,8 +196,67 @@ describe('Bedrock grant and session-policy ceiling are one definition', () => {
     ]) {
       expect(grantTerraform.match(new RegExp(`Sid\\s+=\\s+"${sid}"`, 'g'))).toHaveLength(1);
     }
-    // And there is exactly ONE Statement list in the file.
-    expect(grantTerraform.match(/Statement = \[/g)).toHaveLength(1);
+    // And the model grant has exactly ONE Statement list. The two trust-policy
+    // forms below it hold the others; counting them separately is what keeps this
+    // assertion meaningful now that the file renders more than one document.
+    expect(grantTerraform.match(/Statement = \[/g)).toHaveLength(3);
+    expect(
+      terraformBlock(grantTerraform, '  bedrock_grant_policies = {').match(/Statement = \[/g),
+    ).toHaveLength(1);
+  });
+
+  // req-session-name-trust-condition. A trust policy is the customer's only
+  // control over who may assume their Bedrock role, and it is the document most
+  // easily got wrong by retyping: a dev deployment pinned StringEquals to one
+  // space id under a PLATFORM-scope binding, which denied every other space and
+  // surfaced only as a runtime 500 on the first stage of a run. Rendering it from
+  // Terraform is the fix; these assertions are what stop the render drifting from
+  // the session name the broker actually sends.
+  describe('rendered trust policy', () => {
+    const statement = terraformBlock(grantTerraform, '  bedrock_role_trust_statement = {');
+    const shared = terraformBlock(grantTerraform, '  bedrock_role_trust_policy_shared = {');
+    const spaces = terraformBlock(grantTerraform, '  bedrock_role_trust_policy_spaces = {');
+    const selector = grantTerraform.slice(
+      grantTerraform.indexOf('  bedrock_role_trust_policy_json = '),
+    );
+
+    it('names the broker role as the principal, derived not retyped', () => {
+      expect(statement).toContain('module.lambda.credential_broker_role_arn');
+      expect(statement).toContain('Action    = "sts:AssumeRole"');
+      // One statement base, so the principal cannot drift between the two forms.
+      expect(shared).toContain('merge(local.bedrock_role_trust_statement');
+      expect(spaces).toContain('merge(local.bedrock_role_trust_statement');
+    });
+
+    it('uses the same aidlc- session-name prefix the broker composes', async () => {
+      // The prefix is a stability contract: customers author trust policies on it.
+      // If these two ever disagree, every run is denied at credential resolution.
+      const { ROLE_SESSION_NAME_PREFIX, PREFLIGHT_SESSION_NAME } =
+        await import('../../shared/bedrock-role.js');
+      expect(shared).toContain(`"${ROLE_SESSION_NAME_PREFIX}*"`);
+      expect(spaces).toContain(`"${ROLE_SESSION_NAME_PREFIX}\${id}"`);
+      // The shared form must admit the platform-scope preflight's session name,
+      // which is the whole reason the default is StringLike and not StringEquals.
+      expect(PREFLIGHT_SESSION_NAME.startsWith(ROLE_SESSION_NAME_PREFIX)).toBe(true);
+    });
+
+    it('defaults to the shared form and narrows only when spaces are named', () => {
+      const variable = terraformBlock(grantTerraform, 'variable "bedrock_role_trusted_space_ids"');
+      expect(variable).toContain('default     = []');
+      expect(shared).toContain('StringLike');
+      expect(spaces).toContain('StringEquals');
+      // Selected on the encoded strings: a ternary cannot unify a pattern with a list.
+      expect(selector).toContain('length(var.bedrock_role_trusted_space_ids) > 0');
+      expect(selector).toContain('jsonencode(local.bedrock_role_trust_policy_spaces)');
+      expect(selector).toContain('jsonencode(local.bedrock_role_trust_policy_shared)');
+    });
+
+    it('renders no sts:ExternalId condition, because Terraform cannot know it', () => {
+      // The external ID is generated per binding at save time. Rendering a
+      // placeholder would produce a policy that denies every assume.
+      expect(shared).not.toContain('sts:ExternalId');
+      expect(spaces).not.toContain('sts:ExternalId');
+    });
   });
 
   it('wildcards the account in the ceiling render only', () => {

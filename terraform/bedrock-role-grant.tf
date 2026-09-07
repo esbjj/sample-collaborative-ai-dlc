@@ -11,12 +11,16 @@
 # customer's authoritative control over who may assume it.
 #
 # What this file does is render, from one place, the exact two documents an
-# operator has to paste into that account — the permission policy below and the
-# trust policy in specs/bedrock-iam-role-credential-mode/operator-trust-policies.md. Rendering them from
-# Terraform expressions rather than a copyable code block in prose means the
-# account id, region wildcards and condition keys are derived, not retyped.
+# operator has to paste into that account — the permission policy and the trust
+# policy, both below. Rendering them from Terraform expressions rather than a
+# copyable code block in prose means the account id, region wildcards, broker
+# principal and condition keys are derived, not retyped. A retyped trust policy
+# is how a dev deployment ended up with a single-space `sts:RoleSessionName`
+# condition under a platform-scope binding: every space but one was denied, and
+# the failure surfaced only on the first stage of a run.
 #
 # `terraform output -raw bedrock_role_grant_policy_json`
+# `terraform output -raw bedrock_role_trust_policy_json`
 # `terraform output -raw credential_broker_role_arn`
 # =============================================================================
 
@@ -48,6 +52,26 @@ variable "bedrock_assumable_role_arns" {
   validation {
     condition     = length(var.bedrock_assumable_role_arns) > 0
     error_message = "bedrock_assumable_role_arns must not be empty; the broker would be unable to resolve any role binding."
+  }
+}
+
+# Which spaces the rendered trust policy admits. EMPTY — the default — renders the
+# shared form every space can use, which is the only form a PLATFORM-SCOPE binding
+# can work with: a platform binding has no single space, so the broker's bind-time
+# preflight probes with the session name `aidlc-preflight`
+# (lambda/shared/bedrock-role.js), which a single-space StringEquals condition
+# rejects by design. Set this only for a SPACE-SCOPE binding, to the space ids from
+# the space URLs, and the policy narrows to exactly those sessions.
+variable "bedrock_role_trusted_space_ids" {
+  description = "Space (project) ids the rendered Bedrock trust policy admits. Empty renders the shared form required by a platform-scope binding; set ids only for space-scope bindings."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for id in var.bedrock_role_trusted_space_ids : can(regex("^[A-Za-z0-9._=,@-]{1,58}$", id))
+    ])
+    error_message = "Each id must be a space id as it appears in the space URL; sts:RoleSessionName caps the composed aidlc-<id> at 64 characters."
   }
 }
 
@@ -180,4 +204,57 @@ locals {
   # The session-policy ceiling, minified into the broker's environment. An inline
   # session policy is capped at 2048 characters; this renders to ~0.8 KB.
   bedrock_role_session_policy_json = jsonencode(local.bedrock_grant_policies["ceiling"])
+
+  # ── The trust policy, the customer's own control ──
+  #
+  # req-session-name-trust-condition. The `aidlc-` prefix is the SAME stability
+  # contract as ROLE_SESSION_NAME_PREFIX in lambda/shared/bedrock-role.js, which
+  # composes the name the broker actually sends. The two are asserted equal by
+  # lambda/credential-broker/test/bedrock-role-iam.test.js, because a trust policy
+  # that disagrees with the composed name denies every run — and denies it late,
+  # on the first stage, not at bind time.
+  #
+  # No sts:ExternalId condition is rendered: the external ID is generated per
+  # binding when the binding is saved, so Terraform cannot know it. A CROSS-ACCOUNT
+  # role must add it by hand from the save response (docs/getting-started/bedrock-credentials.md).
+  #
+  # One statement base, two conditions. The choice is made on the ENCODED strings,
+  # not on the two condition objects: a ternary has to unify its result types, and
+  # these conditions are deliberately different shapes (a pattern vs a list).
+  bedrock_role_trust_statement = {
+    Sid    = "AllowCollaborativeAiDlcCredentialBroker"
+    Effect = "Allow"
+    # The broker execution role is the only principal holding sts:AssumeRole for
+    # customer Bedrock roles, so it is the only principal a trust policy names.
+    Principal = { AWS = module.lambda.credential_broker_role_arn }
+    Action    = "sts:AssumeRole"
+  }
+
+  # Shared by every space. The only form a PLATFORM-SCOPE binding can use, and it
+  # admits the `aidlc-preflight` session name that binding's preflight probes with.
+  bedrock_role_trust_policy_shared = {
+    Version = "2012-10-17"
+    Statement = [
+      merge(local.bedrock_role_trust_statement, {
+        Condition = { StringLike = { "sts:RoleSessionName" = "aidlc-*" } }
+      }),
+    ]
+  }
+
+  # Pinned to named spaces, for a SPACE-SCOPE binding. StringEquals on a closed set
+  # is tighter than a pattern when the set is known.
+  bedrock_role_trust_policy_spaces = {
+    Version = "2012-10-17"
+    Statement = [
+      merge(local.bedrock_role_trust_statement, {
+        Condition = {
+          StringEquals = {
+            "sts:RoleSessionName" = [for id in var.bedrock_role_trusted_space_ids : "aidlc-${id}"]
+          }
+        }
+      }),
+    ]
+  }
+
+  bedrock_role_trust_policy_json = length(var.bedrock_role_trusted_space_ids) > 0 ? jsonencode(local.bedrock_role_trust_policy_spaces) : jsonencode(local.bedrock_role_trust_policy_shared)
 }
