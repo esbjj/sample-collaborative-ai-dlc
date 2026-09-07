@@ -43,7 +43,8 @@ import { isCredentialFailure, isExpiredCredentialFailure } from '../cli/credenti
 // True when this invocation's temporary credential had already expired by the time
 // the CLI exited.
 //
-// req-expiry-tripwire. isExpiredCredentialFailure reads the CLI's stderr, which is
+// specs/bedrock-iam-role-credential-mode: req-expiry-tripwire.
+// isExpiredCredentialFailure reads the CLI's stderr, which is
 // wording the platform does not control: a CLI that phrases expiry differently, or
 // wraps it as a bare 403, would be filed as credential_invalid or cli_nonzero_exit
 // and the counter that gates dec-v1-no-refresh would UNDER-count — hiding exactly
