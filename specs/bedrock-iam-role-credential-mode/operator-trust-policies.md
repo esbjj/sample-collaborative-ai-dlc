@@ -57,7 +57,6 @@ spec, and so there is exactly one copy to keep correct.
 Same-account bindings may omit `sts:ExternalId`: the trust policy already names exactly one
 principal, and the confused-deputy problem is a third-party one.
 
-
 ## The session-name format is a stability contract
 
 `RoleSessionName` is `aidlc-<projectId>`, composed in exactly one place on the server (the credential broker) and never accepted from a container.

@@ -89,7 +89,7 @@ option at **personal** scope.
 
 One of the two is required for Claude Code, OpenCode, and Codex: the Bedrock AgentCore runtime's
 IAM role intentionally has no Amazon Bedrock model-invocation permissions, so an agent never
-inherits Bedrock access from the runtime it executes in. That is why role mode uses a *separate*
+inherits Bedrock access from the runtime it executes in. That is why role mode uses a _separate_
 broker role rather than the runtime's own identity.
 
 For Codex, additionally enable access to the OpenAI models in the Bedrock console for your Region,
