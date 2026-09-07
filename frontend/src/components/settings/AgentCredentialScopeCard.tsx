@@ -66,7 +66,8 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
   const [preflight, setPreflight] = useState<BedrockPreflightFailure | null>(null);
   // Held separately from `settings` so it survives a REJECTED save: the operator
   // needs the value precisely when the preflight has just failed, because that is
-  // the trust policy they are about to write (dec-external-id-storage).
+  // the trust policy they are about to write
+  // (specs/bedrock-iam-role-credential-mode: dec-external-id-storage).
   const [externalId, setExternalId] = useState<string | null>(null);
   // A scope stores exactly ONE Bedrock value in one SSM parameter, so this is a
   // genuine either/or rather than two independent fields. The radio makes that
@@ -94,10 +95,17 @@ export function AgentCredentialScopeCard({ scope, projectId }: Props) {
       // An idempotent read, not a one-time reveal: recovering the value is a plain
       // read rather than a rotation (dec-external-id-not-secret).
       //
-      // A read that omits the field does NOT clear a value already in hand — the
-      // field is absent on any read not gated to a principal who may modify the
-      // binding, and losing it would strand an operator mid-bootstrap.
-      setExternalId((current) => result.bedrockExternalId ?? current);
+      // ABSENT and NULL mean different things and are treated differently. The field
+      // is absent on any read not gated to a principal who may modify the binding,
+      // and losing the value then would strand an operator mid-bootstrap — so absent
+      // keeps what is in hand. An explicit null is the gated, authoritative answer
+      // "this binding sends no external ID", which happens after a rebind to a
+      // same-account role, and keeping the old value there would leave the trust
+      // policy panel telling the operator to require an sts:ExternalId that the
+      // binding will never send.
+      setExternalId((current) =>
+        result.bedrockExternalId === undefined ? current : result.bedrockExternalId,
+      );
     };
     if (scope === 'platform') {
       const result = await agentsService.getSettings();

@@ -289,6 +289,7 @@ describe('agent credentials', () => {
       bedrockMode: null,
       bedrockRoleArn: null,
       bedrockExternalIdSet: false,
+      bedrockExternalId: null,
     });
   });
 
@@ -309,6 +310,7 @@ describe('agent credentials', () => {
       bedrockMode: 'role',
       bedrockRoleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
       bedrockExternalIdSet: false,
+      bedrockExternalId: null,
     });
   });
 
@@ -329,10 +331,18 @@ describe('agent credentials', () => {
     expect(status.bedrockBearerTokenSet).toBe(false);
     expect(status.bedrockMode).toBe('role');
     expect(status.bedrockRoleArn).toBe('arn:aws:iam::111122223333:role/aidlc-bedrock-inference');
-    // The external ID is a secret: only its presence is reported, and the value
-    // must never appear anywhere in the status (req-external-id-lifecycle).
+    // The external ID is NOT a secret. req-external-id-lifecycle is explicit that an
+    // earlier "never returned to a client" revision was REVERSED: AWS does not treat
+    // it as one, and an operator cannot write sts:ExternalId without seeing it. It IS
+    // tenant-identifying, so the rule design.md actually states is a gated read path,
+    // not absence from this payload — the gate is readCredentialScopeStatusViaBroker's
+    // `includeBindingDetail`, asserted in that module's own tests.
+    //
+    // The value must come from the BINDING, because that is what the broker sends to
+    // STS. The standalone staging parameter is not authoritative: it survives a
+    // rebind to a role that sends a different external ID, or none.
     expect(status.bedrockExternalIdSet).toBe(true);
-    expect(JSON.stringify(status)).not.toContain('abc123-external');
+    expect(status.bedrockExternalId).toBe('abc123-external');
   });
 
   // A malformed role-shaped value must NOT report bearer. Reporting bearer would
@@ -386,6 +396,7 @@ describe('agent credentials', () => {
       bedrockMode: 'bearer',
       bedrockRoleArn: null,
       bedrockExternalIdSet: false,
+      bedrockExternalId: null,
     });
 
     await writeCredentialScope(ssm, {
@@ -415,8 +426,13 @@ describe('agent credentials', () => {
   it('deletes a non-platform scope idempotently', async () => {
     const bedrockPath = '/app/dev/projects/p-1/agent-credentials/bedrock-bearer-token';
     const kiroPath = '/app/dev/projects/p-1/agent-credentials/kiro-api-key';
+    // Stored OUTSIDE agent-credentials/, so the provider loop cannot reach it. If
+    // teardown misses it, the value outlives the space and a space recreated with
+    // the same id inherits an external ID no trust policy references.
+    const externalIdPath = '/app/dev/projects/p-1/bedrock-external-id';
     values.set(bedrockPath, 'space-bedrock');
     values.set(kiroPath, 'space-kiro');
+    values.set(externalIdPath, 'space-external-id');
 
     await expect(
       deleteCredentialScope(ssm, {
@@ -424,9 +440,10 @@ describe('agent credentials', () => {
         source: 'space',
         projectId: 'p-1',
       }),
-    ).resolves.toEqual({ deleted: ['bedrock', 'kiro'], missing: [] });
+    ).resolves.toEqual({ deleted: ['bedrock', 'kiro'], missing: [], externalIdDeleted: true });
     expect(values.has(bedrockPath)).toBe(false);
     expect(values.has(kiroPath)).toBe(false);
+    expect(values.has(externalIdPath)).toBe(false);
 
     await expect(
       deleteCredentialScope(ssm, {
@@ -434,7 +451,11 @@ describe('agent credentials', () => {
         source: 'space',
         projectId: 'p-1',
       }),
-    ).resolves.toEqual({ deleted: [], missing: ['bedrock', 'kiro'] });
+    ).resolves.toEqual({
+      deleted: [],
+      missing: ['bedrock', 'kiro'],
+      externalIdDeleted: false,
+    });
   });
 });
 
@@ -507,7 +528,12 @@ describe('describeBedrockBinding is total', () => {
     ];
     for (const value of hostile) {
       const described = describeBedrockBinding(value);
-      expect(Object.keys(described).toSorted()).toEqual(['externalIdSet', 'mode', 'roleArn']);
+      expect(Object.keys(described).toSorted()).toEqual([
+        'externalId',
+        'externalIdSet',
+        'mode',
+        'roleArn',
+      ]);
       expect([null, 'bearer', 'role']).toContain(described.mode);
       expect(typeof described.externalIdSet).toBe('boolean');
       // A broken binding must never be reported as a usable bearer secret.
@@ -589,7 +615,10 @@ describe('bedrock external ID storage and cross-account detection', () => {
       Name: '/collab/dev/bedrock-external-id',
       Value: first,
       Type: 'SecureString',
-      Overwrite: true,
+      // Conditional, not last-write-wins: SSM itself arbitrates the race between two
+      // concurrent saves for one scope, so both callers end up agreeing with the
+      // stored value instead of one holding a value that was overwritten.
+      Overwrite: false,
     });
 
     // Now that it exists, a second call must NOT mint a new one — recovering a
@@ -597,6 +626,23 @@ describe('bedrock external ID storage and cross-account detection', () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: first } });
     expect(await ensureBedrockExternalId(ssm, { base: BASE, source: 'platform' })).toBe(first);
     expect(ssm.commandCalls(PutParameterCommand)).toHaveLength(1);
+  });
+
+  // The race this exists to close: two saves for one scope both read absent, both
+  // generate, and one write loses. The loser must return the WINNER's value — if it
+  // returned its own, the operator would paste an external ID that is not stored and
+  // STS would answer with the one rejection cause that cannot name a reason.
+  it('returns the winner value when a concurrent save already created the parameter', async () => {
+    const winner = 'the-value-that-actually-got-stored';
+    ssm
+      .on(GetParameterCommand)
+      .rejectsOnce(Object.assign(new Error('missing'), { name: 'ParameterNotFound' }))
+      .resolves({ Parameter: { Value: winner } });
+    ssm
+      .on(PutParameterCommand)
+      .rejects(Object.assign(new Error('exists'), { name: 'ParameterAlreadyExists' }));
+
+    expect(await ensureBedrockExternalId(ssm, { base: BASE, source: 'platform' })).toBe(winner);
   });
 
   it('reads an absent external ID as null rather than throwing', async () => {

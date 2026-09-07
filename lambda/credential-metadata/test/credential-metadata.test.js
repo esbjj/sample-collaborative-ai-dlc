@@ -42,6 +42,9 @@ describe('agent credential metadata broker', () => {
         bedrockMode: 'bearer',
         bedrockRoleArn: null,
         bedrockExternalIdSet: false,
+        // Null for a bearer binding, which carries no external ID. The bearer TOKEN
+        // itself remains a real secret and is still asserted absent below.
+        bedrockExternalId: null,
       },
     });
     expect(JSON.stringify(result)).not.toContain('secret-bedrock');

@@ -491,7 +491,7 @@ export const handler = async (event) => {
           // (req-same-and-cross-account). The platform fallback is read WITHOUT
           // detail: a space admin may see that the platform has a binding, but
           // the platform binding is not theirs to edit.
-          const [space, platformFallback, spaceExternalId] = await Promise.all([
+          const [space, platformFallback, stagedExternalId] = await Promise.all([
             readCredentialScopeStatusViaBroker({
               source: 'space',
               projectId,
@@ -500,10 +500,11 @@ export const handler = async (event) => {
             readCredentialScopeStatusViaBroker({
               source: 'platform',
             }),
-            // Idempotent read of this space's own external ID, so a bootstrap that
-            // was interrupted can be resumed rather than rotated
-            // (dec-external-id-not-secret). Best-effort: an absent parameter is the
-            // normal case for a same-account or bearer binding.
+            // The BOOTSTRAP value only. A cross-account binding cannot be saved
+            // until its trust policy already names the external ID, so between
+            // generation and the first accepted save there is no binding to read it
+            // from and this staging parameter is the only source
+            // (dec-external-id-storage). Best-effort: absent is the normal case.
             readBedrockExternalId(ssm, {
               base: credentialBase,
               source: 'space',
@@ -512,7 +513,13 @@ export const handler = async (event) => {
           ]);
           return response(200, {
             ...space,
-            bedrockExternalId: spaceExternalId,
+            // The BINDING wins. It carries the value the broker sends to STS, so it
+            // is the only correct answer once a binding exists; the staging
+            // parameter outlives a rebind to a same-account role that sends none,
+            // and showing that would tell the operator to add an sts:ExternalId
+            // condition this binding can never satisfy.
+            bedrockExternalId:
+              space.bedrockMode === 'role' ? (space.bedrockExternalId ?? null) : stagedExternalId,
             // A space owner writing a trust policy needs the principal to trust
             // just as much as a platform admin does (req-same-and-cross-account).
             bedrockBrokerRoleArn: process.env.CREDENTIAL_BROKER_ROLE_ARN || null,
@@ -669,8 +676,8 @@ export const handler = async (event) => {
             source: 'platform',
             includeBindingDetail: bindingEditable,
           }),
-          // Read idempotently rather than generated once at save: recovering a
-          // lost value is a plain read, not a rotation (dec-external-id-not-secret).
+          // The BOOTSTRAP value only — see the space route. Once a binding exists,
+          // the binding's own external ID is authoritative and this is ignored.
           bindingEditable
             ? readBedrockExternalId(ssm, { base: prefix, source: 'platform' }).catch(() => null)
             : Promise.resolve(null),
@@ -744,7 +751,14 @@ export const handler = async (event) => {
           ...platformCredentialStatus,
           ...(bindingEditable
             ? {
-                bedrockExternalId: platformExternalId,
+                // The BINDING wins once one exists; the staging parameter is only
+                // the pre-first-save bootstrap value. Reading the display off the
+                // parameter would survive a rebind to a same-account role that
+                // sends no external ID.
+                bedrockExternalId:
+                  platformCredentialStatus.bedrockMode === 'role'
+                    ? (platformCredentialStatus.bedrockExternalId ?? null)
+                    : platformExternalId,
                 // The principal a customer role must trust. Non-secret, and an
                 // operator cannot write a trust policy without it
                 // (req-same-and-cross-account).

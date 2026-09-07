@@ -90,6 +90,78 @@ export const isConfiguredCredentialValue = (value) => {
   return normalized !== '' && normalized !== 'placeholder';
 };
 
+// ── Credential-store failures, and the one place this module reads SSM ──
+//
+// specs/bedrock-iam-role-credential-mode: req-resolution-resilience. The broker
+// reads SSM on EVERY resolution, concurrently across stages, so SSM's own request
+// rate is on the critical path. A throttled read must be legible as exactly that
+// rather than collapsing into a generic broker failure, because the operator
+// response differs: throttling is transient and the stage retry will clear it,
+// while an unavailable store is a configuration or permission fault.
+//
+// The classification is applied by the two READ HELPERS below rather than at each
+// call site, and every read in this module goes through them. That placement is
+// the point: a raw SSM error can echo the parameter name, which identifies the
+// tenant, so a read that forgot to classify would leak one. Making the helper the
+// only reader removes the chance to forget instead of fixing it once per site.
+export const AGENT_CREDENTIAL_STORE_ERROR_CODES = Object.freeze({
+  THROTTLED: 'AGENT_CREDENTIAL_STORE_THROTTLED',
+  UNAVAILABLE: 'AGENT_CREDENTIAL_STORE_UNAVAILABLE',
+});
+
+const THROTTLED_SSM_ERRORS = new Set([
+  'ThrottlingException',
+  'Throttling',
+  'TooManyRequestsException',
+  'RequestLimitExceeded',
+  'TooManyUpdates',
+  'SlowDown',
+]);
+
+// Map an SSM failure onto one allowlisted code, discarding the original message.
+export const classifyCredentialStoreFailure = (error) => {
+  const name = error?.name || error?.Code || '';
+  const code = THROTTLED_SSM_ERRORS.has(name)
+    ? AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
+    : AGENT_CREDENTIAL_STORE_ERROR_CODES.UNAVAILABLE;
+  return Object.assign(
+    new Error(
+      code === AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
+        ? 'Credential store read was throttled'
+        : 'Credential store read failed',
+    ),
+    { code },
+  );
+};
+
+// Read ONE parameter. Returns null when it does not exist — absence is a distinct,
+// expected answer (a cleared scope, a binding that never needed an external ID)
+// and must not be confused with a store outage. Every other failure throws an
+// allowlisted store code.
+const readStoreParameter = async (ssm, name) => {
+  try {
+    const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
+    return result.Parameter?.Value ?? '';
+  } catch (error) {
+    if (error?.name === 'ParameterNotFound') return null;
+    throw classifyCredentialStoreFailure(error);
+  }
+};
+
+// Read MANY parameters. GetParameters omits absent names instead of failing, so
+// absence needs no special case here; the caller sees a missing key.
+const readStoreParameters = async (ssm, names) => {
+  if (names.length === 0) return {};
+  try {
+    const result = await ssm.send(new GetParametersCommand({ Names: names, WithDecryption: true }));
+    return Object.fromEntries(
+      (result.Parameters || []).map((parameter) => [parameter.Name, parameter.Value || '']),
+    );
+  } catch (error) {
+    throw classifyCredentialStoreFailure(error);
+  }
+};
+
 // ── Bedrock binding value: bearer token or IAM role ──
 //
 // The bedrock parameter holds EITHER today's plain bearer string OR a JSON
@@ -195,29 +267,47 @@ export const credentialValueKindSafe = (value) => {
 //
 // NEITHER the role ARN nor the external ID is a secret: AWS says so of the
 // external ID in terms, and dec-external-id-not-secret records why. Both are
-// however tenant-identifying, so the CALLER decides what to expose — this
-// function reports the external ID only as a boolean, and a caller on a
-// lower-privilege path must also drop `roleArn`. The gated caller adds the
-// values back (req-same-and-cross-account, req-external-id-lifecycle).
+// however tenant-identifying, so the CALLER decides what to expose — a caller on a
+// lower-privilege path must drop `roleArn` and `externalId` and keep only
+// `externalIdSet`. The gated caller passes the values through
+// (req-same-and-cross-account, req-external-id-lifecycle).
+//
+// `externalId` is the value the binding ITSELF carries, which is the value the
+// broker will send to STS. It is therefore the authoritative answer to "which
+// external ID does this binding use", and the standalone staging parameter is NOT:
+// the parameter survives a rebind to a same-account role that sends none, so
+// reading the display off the parameter can tell an operator to add an
+// sts:ExternalId condition that this binding will never satisfy.
 //
 // A malformed role-shaped value reports mode `role` with a null ARN, never
 // `bearer`. Reporting bearer would tell the operator a usable secret is present
 // when the binding is broken, which is the failure this field exists to expose.
 export const describeBedrockBinding = (value) => {
   const kind = credentialValueKindSafe(value);
-  if (kind === null) return { mode: null, roleArn: null, externalIdSet: false };
+  if (kind === null) return { mode: null, roleArn: null, externalId: null, externalIdSet: false };
   if (kind === CREDENTIAL_VALUE_KINDS.BEARER) {
-    return { mode: CREDENTIAL_VALUE_KINDS.BEARER, roleArn: null, externalIdSet: false };
+    return {
+      mode: CREDENTIAL_VALUE_KINDS.BEARER,
+      roleArn: null,
+      externalId: null,
+      externalIdSet: false,
+    };
   }
   try {
     const { roleArn, externalId } = parseRoleBindingValue(value);
     return {
       mode: CREDENTIAL_VALUE_KINDS.ROLE,
       roleArn,
+      externalId: externalId ?? null,
       externalIdSet: Boolean(externalId),
     };
   } catch {
-    return { mode: CREDENTIAL_VALUE_KINDS.ROLE, roleArn: null, externalIdSet: false };
+    return {
+      mode: CREDENTIAL_VALUE_KINDS.ROLE,
+      roleArn: null,
+      externalId: null,
+      externalIdSet: false,
+    };
   }
 };
 
@@ -303,37 +393,55 @@ export const bedrockRoleIsCrossAccount = ({ roleArn, platformAccountId }) => {
 
 export const readBedrockExternalId = async (ssm, { base, source, projectId = null }) => {
   const path = bedrockExternalIdPath({ base, source, projectId });
-  try {
-    const result = await ssm.send(new GetParameterCommand({ Name: path, WithDecryption: true }));
-    const value = String(result.Parameter?.Value || '').trim();
-    return value || null;
-  } catch (error) {
-    if (error?.name === 'ParameterNotFound') return null;
-    throw error;
-  }
+  const value = await readStoreParameter(ssm, path);
+  return value === null ? null : String(value).trim() || null;
 };
 
-// Idempotent: the FIRST call generates and stores, every later call returns the
-// same value. Idempotency is the whole point — req-external-id-lifecycle requires
-// the value be re-readable rather than shown once, and a stable value is what lets
-// a rejected save be retried against a trust policy the operator has already
-// written.
+// Idempotent, and atomically so: the FIRST caller stores, every later caller
+// returns the SAME value.
+//
+// req-external-id-lifecycle requires the value be re-readable rather than shown
+// once, because a stable value is what lets a save rejected by the preflight be
+// retried against a trust policy the operator has already written. A read-then-
+// write with Overwrite:true does not deliver that under concurrency: two saves for
+// one scope can both read absent, both generate, and the later write wins — leaving
+// the earlier caller holding a value that is no longer stored. The operator would
+// then paste an external ID that can never authenticate, and STS reports it as the
+// undifferentiated trust-policy rejection that by construction cannot name a cause
+// (BEDROCK_PREFLIGHT_CAUSES.TRUST_POLICY_REJECTED).
+//
+// Overwrite:false makes SSM itself the arbiter: exactly one writer wins, and the
+// loser re-reads the winner's value instead of returning its own. This is also why
+// the parameter is never overwritten once set — rotation is a deliberate operator
+// act, not a side effect of saving a binding.
 export const ensureBedrockExternalId = async (
   ssm,
   { base, source, projectId = null, randomBytes = defaultRandomBytes },
 ) => {
+  const path = bedrockExternalIdPath({ base, source, projectId });
   const existing = await readBedrockExternalId(ssm, { base, source, projectId });
   if (existing) return existing;
   const externalId = generateExternalId(randomBytes);
-  await ssm.send(
-    new PutParameterCommand({
-      Name: bedrockExternalIdPath({ base, source, projectId }),
-      Value: externalId,
-      Type: 'SecureString',
-      Overwrite: true,
-    }),
-  );
-  return externalId;
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: path,
+        Value: externalId,
+        Type: 'SecureString',
+        Overwrite: false,
+      }),
+    );
+    return externalId;
+  } catch (error) {
+    if (error?.name !== 'ParameterAlreadyExists') throw classifyCredentialStoreFailure(error);
+    // A concurrent save won the race. Its value is the stored one, so discard ours
+    // and return theirs — both callers then agree with what the broker will send.
+    const winner = await readBedrockExternalId(ssm, { base, source, projectId });
+    if (winner) return winner;
+    // ParameterAlreadyExists with nothing readable back is not a state this can
+    // recover from by guessing; fail rather than return a value that is not stored.
+    throw classifyCredentialStoreFailure(error);
+  }
 };
 
 // Compose the value that is actually STORED for a Bedrock binding write.
@@ -502,19 +610,8 @@ const deleteParameterIfPresent = async (ssm, path) => {
 
 // Broker-only read path. API Lambdas call the metadata broker and deliberately
 // have no ssm:GetParameter(s) permission on agent credential paths.
-const fetchValues = async (ssm, paths) => {
-  const names = [...new Set(Object.values(paths))];
-  if (names.length === 0) return {};
-  const result = await ssm.send(
-    new GetParametersCommand({
-      Names: names,
-      WithDecryption: true,
-    }),
-  );
-  return Object.fromEntries(
-    (result.Parameters || []).map((parameter) => [parameter.Name, parameter.Value || '']),
-  );
-};
+const fetchValues = async (ssm, paths) =>
+  readStoreParameters(ssm, [...new Set(Object.values(paths))]);
 
 // Per-provider set-state for one scope.
 //
@@ -552,6 +649,10 @@ export const readCredentialScopeStatus = async (
   status.bedrockMode = bedrock.mode;
   status.bedrockRoleArn = bedrock.roleArn;
   status.bedrockExternalIdSet = bedrock.externalIdSet;
+  // The value the binding itself carries, i.e. what the broker will actually send.
+  // Gated to callers that may modify the binding by
+  // readCredentialScopeStatusViaBroker, exactly as bedrockRoleArn is.
+  status.bedrockExternalId = bedrock.externalId;
   return status;
 };
 
@@ -617,7 +718,19 @@ export const deleteCredentialScope = async (
     if (await deleteParameterIfPresent(ssm, path)) deleted.push(provider);
     else missing.push(provider);
   }
-  return { deleted, missing };
+  // The external ID is stored OUTSIDE agent-credentials/ (dec-external-id-storage),
+  // so the provider loop above cannot reach it. Deleting it with the scope is what
+  // gives it a lifecycle: without this it outlives the binding it belongs to, and a
+  // recreated space reusing the same projectId would inherit a stale value that no
+  // trust policy references. User scope never has one (dec-user-scope-role-deferred).
+  let externalIdDeleted = false;
+  if (normalizedSource === 'space') {
+    externalIdDeleted = await deleteParameterIfPresent(
+      ssm,
+      bedrockExternalIdPath({ base, source: normalizedSource, projectId }),
+    );
+  }
+  return { deleted, missing, externalIdDeleted };
 };
 
 export const resolveEffectiveCredentialBindings = async (ssm, { base, projectId, userId }) => {
@@ -649,45 +762,6 @@ export const resolveEffectiveCredentialBindings = async (ssm, { base, projectId,
   return bindings;
 };
 
-// ── Credential-store failures ──
-//
-// specs/bedrock-iam-role-credential-mode: req-resolution-resilience. The broker
-// now reads SSM on EVERY resolution, concurrently across stages, so SSM's own
-// request rate is on the critical path. A throttled read must be legible as
-// exactly that rather than collapsing into a generic broker failure, because the
-// operator response differs: throttling is transient and the stage retry will
-// clear it, while an unavailable store is a configuration or permission fault.
-export const AGENT_CREDENTIAL_STORE_ERROR_CODES = Object.freeze({
-  THROTTLED: 'AGENT_CREDENTIAL_STORE_THROTTLED',
-  UNAVAILABLE: 'AGENT_CREDENTIAL_STORE_UNAVAILABLE',
-});
-
-const THROTTLED_SSM_ERRORS = new Set([
-  'ThrottlingException',
-  'Throttling',
-  'TooManyRequestsException',
-  'RequestLimitExceeded',
-  'TooManyUpdates',
-  'SlowDown',
-]);
-
-// Map an SSM failure onto one allowlisted code, discarding the original message —
-// an SSM error can echo the parameter name, which identifies the tenant.
-export const classifyCredentialStoreFailure = (error) => {
-  const name = error?.name || error?.Code || '';
-  const code = THROTTLED_SSM_ERRORS.has(name)
-    ? AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
-    : AGENT_CREDENTIAL_STORE_ERROR_CODES.UNAVAILABLE;
-  return Object.assign(
-    new Error(
-      code === AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
-        ? 'Credential store read was throttled'
-        : 'Credential store read failed',
-    ),
-    { code },
-  );
-};
-
 export const readCredentialBindingValue = async (ssm, { base, binding, projectId = null }) => {
   const normalized = normalizeCredentialBinding(binding);
   if (!normalized) return '';
@@ -698,21 +772,12 @@ export const readCredentialBindingValue = async (ssm, { base, binding, projectId
     projectId,
     userId: normalized.userId,
   });
-  try {
-    const result = await ssm.send(
-      new GetParameterCommand({
-        Name: path,
-        WithDecryption: true,
-      }),
-    );
-    const value = result.Parameter?.Value || '';
-    return isConfiguredCredentialValue(value) ? value : '';
-  } catch (error) {
-    // An absent parameter is a MISSING binding, not a failure: a cleared scope
-    // must fail closed as "no credential", never as a store outage.
-    if (error?.name === 'ParameterNotFound') return '';
-    throw classifyCredentialStoreFailure(error);
-  }
+  // An absent parameter is a MISSING binding, not a failure: a cleared scope must
+  // fail closed as "no credential", never as a store outage. readStoreParameter
+  // returns null for exactly that case and classifies everything else.
+  const value = await readStoreParameter(ssm, path);
+  if (value === null) return '';
+  return isConfiguredCredentialValue(value) ? value : '';
 };
 
 export const credentialSourcesFromBindings = (bindings = {}) => ({

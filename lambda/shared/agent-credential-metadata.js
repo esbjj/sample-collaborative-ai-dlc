@@ -76,10 +76,19 @@ export const readCredentialScopeStatusViaBroker = async (request, deps) => {
   // The role ARN is not a secret, but it is tenant-identifying and no
   // lower-privilege surface needs it — GET /agents/settings is reachable by any
   // authenticated user, so it must not carry which role a deployment assumes.
+  //
+  // The binding's external ID rides the SAME gate. It is the value the broker will
+  // send to STS, so it is the authoritative answer for a trust policy — the
+  // standalone staging parameter is not, because it outlives a rebind to a
+  // same-account role that sends none.
   if (includeBindingDetail) {
     status.bedrockRoleArn =
       typeof result.status.bedrockRoleArn === 'string' && result.status.bedrockRoleArn
         ? result.status.bedrockRoleArn
+        : null;
+    status.bedrockExternalId =
+      typeof result.status.bedrockExternalId === 'string' && result.status.bedrockExternalId
+        ? result.status.bedrockExternalId
         : null;
   }
   return status;

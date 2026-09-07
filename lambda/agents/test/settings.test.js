@@ -366,12 +366,17 @@ describe('platform cross-account role binding external ID', () => {
         bedrockMode: 'role',
         bedrockRoleArn: CROSS_ACCOUNT,
         bedrockExternalIdSet: true,
+        // What the BINDING carries, i.e. what the broker will send to STS.
+        bedrockExternalId: 'the-stored-external-id',
       },
     });
     ssmMock.on(GetParametersCommand).resolves({ Parameters: [] });
-    // The parameter EXISTS in both cases — the difference must come from the gate,
-    // not from the value being absent.
-    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'the-stored-external-id' } });
+    // The staging parameter holds a DIFFERENT value on purpose. It is only the
+    // pre-first-save bootstrap source, and it outlives a rebind to a role that
+    // sends a different external ID or none at all — so once a binding exists the
+    // binding wins, and reading the display off this parameter would hand the
+    // operator an sts:ExternalId condition the binding can never satisfy.
+    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'stale-staged-value' } });
 
     const admin = JSON.parse((await handler(event('GET', undefined, 'platform-admin'))).body);
     expect(admin.bedrockExternalId).toBe('the-stored-external-id');
@@ -384,6 +389,29 @@ describe('platform cross-account role binding external ID', () => {
     expect(body.bedrockRoleArn).toBeUndefined();
     expect(ordinary.body).not.toContain('the-stored-external-id');
     expect(ordinary.body).not.toContain(CROSS_ACCOUNT);
+  });
+
+  // The regression this pairs with: a scope rebound from a cross-account role to a
+  // same-account one sends NO external ID, but the staging parameter survives. The
+  // response must report null rather than the stale staged value.
+  it('reports no external ID for a role binding that sends none, despite a staged value', async () => {
+    credentialMetadataHandler = () => ({
+      ok: true,
+      status: {
+        bedrockBearerTokenSet: false,
+        kiroApiKeySet: false,
+        bedrockMode: 'role',
+        bedrockRoleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+        bedrockExternalIdSet: false,
+        bedrockExternalId: null,
+      },
+    });
+    ssmMock.on(GetParametersCommand).resolves({ Parameters: [] });
+    ssmMock.on(GetParameterCommand).resolves({ Parameter: { Value: 'stale-staged-value' } });
+
+    const admin = JSON.parse((await handler(event('GET', undefined, 'platform-admin'))).body);
+    expect(admin.bedrockExternalId).toBeNull();
+    expect(JSON.stringify(admin)).not.toContain('stale-staged-value');
   });
 });
 

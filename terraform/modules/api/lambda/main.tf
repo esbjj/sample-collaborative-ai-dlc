@@ -641,12 +641,21 @@ resource "aws_iam_role_policy" "neptune_artifacts" {
           "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/custom-mcp-servers",
         ]
       },
-      # Project teardown deletes the two Space credential SecureStrings. Keep
-      # this delete-only so the Projects Lambda cannot read or rotate values.
+      # Project teardown deletes the two Space credential SecureStrings, plus the
+      # Bedrock role binding's external ID. Keep this delete-only so the Projects
+      # Lambda cannot read or rotate values.
+      #
+      # The external ID lives OUTSIDE agent-credentials/ (dec-external-id-storage),
+      # so it needs its own resource here. Without it the parameter outlives the
+      # space it belongs to, and a space recreated with the same id would inherit a
+      # stale value no trust policy references.
       {
-        Effect   = "Allow"
-        Action   = ["ssm:DeleteParameter"]
-        Resource = ["arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/projects/*/agent-credentials/*"]
+        Effect = "Allow"
+        Action = ["ssm:DeleteParameter"]
+        Resource = [
+          "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/projects/*/agent-credentials/*",
+          "arn:${local.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/projects/*/bedrock-external-id",
+        ]
       },
     ]
   })
