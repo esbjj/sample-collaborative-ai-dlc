@@ -2,6 +2,8 @@
 
 Operator reference for the Bedrock IAM-role credential mode. The design and its rationale live in [design.md](design.md) beside this file and in [ADR-0001](../../adr/0001-bedrock-iam-role-credential-mode.md).
 
+This file covers **setting a binding up**. Day-two operation — what to watch, how to attribute spend, and what each failure code means — is [operator-runbook.md](operator-runbook.md).
+
 This file sits with its spec rather than under `docs/`: `zensical.toml` declares an explicit nav, so a file under `docs/` is either published to the public site or orphaned (`dec-spec-location`).
 
 ## What you are configuring
@@ -207,12 +209,11 @@ Each binding carries its own external ID, so if several spaces each bind the sam
 
 ## What happens when a credential expires
 
-v1 ships **no refresh mechanism**, by measurement rather than omission: stage durations are p50 5 min, p90 10 min, p99 20 min against a credential that lives 3600 s. That 3600 s is a hard STS ceiling for role chaining, not a configurable value — the broker itself runs under an assumed role.
+v1 ships **no refresh mechanism**, by measurement rather than omission, and a stage that
+outlives its credential fails with the structured reason `credential_expired` and is retried.
 
-A stage that outlives its credential fails with reason `credential_expired`, and the existing stage retry resolves a fresh credential through the normal invocation path.
-
-- **A retry re-runs the whole stage attempt**, so work done before the expiry is lost.
-- Once the retry budget is exhausted the stage ends `FAILED` carrying the same reason.
-- `credential_expired` is a persisted, UI-visible failure reason. **A non-zero count is the trigger to revisit the no-refresh decision** — that is the evidence the decision rests on, so it is worth watching rather than assuming.
-
-One accepted risk to be aware of: a credential already minted stays valid for up to 3600 s after the binding is revoked or changed. There is no in-flight revocation in v1.
+That reason is also the tripwire that governs whether refresh is ever built, so it is worth
+watching rather than merely knowing about: see
+[operator-runbook.md](operator-runbook.md#watch-the-credential-expiry-counter) for the count
+command, the trigger, and the up-to-3600s window in which an already-minted credential
+outlives a revoked binding.

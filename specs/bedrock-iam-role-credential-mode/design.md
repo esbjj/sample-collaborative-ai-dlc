@@ -491,6 +491,8 @@ Per-requirement criteria are in the `requirements:` block of [requirements.md](r
 
 ## References
 
+- [operator-trust-policies.md](operator-trust-policies.md) — trust-policy templates and the binding bootstrap
+- [operator-runbook.md](operator-runbook.md) — the expiry tripwire, failure-code triage, spend attribution, Codex status
 - [ADR-0001](../../adr/0001-bedrock-iam-role-credential-mode.md) — rationale, alternatives, probe transcripts
 - [IAM security best practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html) · [SEC02-BP02](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/sec_identities_unique.html) · [AGENTSEC03-BP03](https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentsec03-bp03.html) · [GENSEC01-BP01](https://docs.aws.amazon.com/wellarchitected/latest/generative-ai-lens/gensec01-bp01.html)
 - [AgentCore credentials management](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/security-credentials-management.html) — the MMDS warning
