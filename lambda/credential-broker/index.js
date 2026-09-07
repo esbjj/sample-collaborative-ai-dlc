@@ -204,7 +204,13 @@ const resolveAgentCredentialEntry = async (
   return {
     binding,
     kind: CREDENTIAL_VALUE_KINDS.ROLE,
-    credentials: await assumeBedrockRole({ roleArn, externalId, projectId }, stsClient),
+    credentials: await assumeBedrockRole(
+      // req-least-privilege-assume: the ceiling comes from the environment, rendered
+      // from the same Terraform definition as the customer-facing grant, so what is
+      // enforced cannot drift from what is documented.
+      { roleArn, externalId, projectId, sessionPolicy: env.BEDROCK_SESSION_POLICY || null },
+      stsClient,
+    ),
   };
 };
 

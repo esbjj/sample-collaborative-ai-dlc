@@ -120,7 +120,9 @@ describe('bedrock role grant families', () => {
     // its own defects are fixed — no acceptance criterion depends on it
     // succeeding (req-codex-scope, con-codex-model-missing).
     expect(grantCode).toContain('"bedrock-mantle:CreateInference"');
-    expect(grantCode).toContain('bedrock-mantle:*:${local.bedrock_role_account}:project/*');
+    // `${account}` is the render variable: the grant render substitutes the Bedrock
+    // account, the ceiling render substitutes `*`. One definition, two renders.
+    expect(grantCode).toContain('bedrock-mantle:*:${account}:project/*');
   });
 
   it('scopes every account-bearing ARN to the role-owning account, not the platform account', () => {
@@ -158,5 +160,61 @@ describe('bedrock role grant families', () => {
     // req-credential-safety: no role in this design may create a long-lived credential.
     expect(grantCode).not.toContain('iam:CreateAccessKey');
     expect(grantCode).not.toContain('iam:CreateServiceSpecificCredential');
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-least-privilege-assume.
+//
+// The session-policy ceiling and the customer-facing grant MUST be two renders of one
+// statement definition, not two definitions. This is the load-bearing property: the
+// grant is advice about a role in an account this deployment does not manage, the
+// ceiling is the enforcement, and a ceiling that lags the grant DENIES a call the
+// documented grant permits.
+//
+// That failure is not hypothetical. Moving Codex to the Bedrock Runtime provider added
+// a fourth statement (`project/default`) because the OpenAI-compatible API authorizes
+// against that implicit resource; a copied ceiling would have kept three statements and
+// 401'd every Codex call while the operator's own policy looked correct.
+describe('Bedrock grant and session-policy ceiling are one definition', () => {
+  it('renders both from the same statements local, so neither can be a copy', () => {
+    expect(grantTerraform).toContain('bedrock_grant_policies = {');
+    expect(grantTerraform).toContain('for render, account in local.bedrock_grant_render_accounts');
+    // Both consumers must INDEX the shared render map rather than restate statements.
+    expect(grantTerraform).toContain(
+      'bedrock_role_grant_policy = local.bedrock_grant_policies["grant"]',
+    );
+    expect(grantTerraform).toContain('jsonencode(local.bedrock_grant_policies["ceiling"])');
+  });
+
+  it('defines each statement exactly once (a second copy is the drift this prevents)', () => {
+    // Every Sid appears once. A hand-copied ceiling would duplicate all four.
+    for (const sid of [
+      'InvokeThroughInferenceProfiles',
+      'InvokeFoundationModelsOnlyViaInferenceProfile',
+      'CodexOpenAiCompatibleProject',
+      'CodexMantleInference',
+    ]) {
+      expect(grantTerraform.match(new RegExp(`Sid\\s+=\\s+"${sid}"`, 'g'))).toHaveLength(1);
+    }
+    // And there is exactly ONE Statement list in the file.
+    expect(grantTerraform.match(/Statement = \[/g)).toHaveLength(1);
+  });
+
+  it('wildcards the account in the ceiling render only', () => {
+    // The grant names the Bedrock account; the ceiling cannot, because
+    // bedrock_assumable_role_arns may span accounts while bedrock_role_account_id names
+    // one — an account-pinned ceiling would deny a legitimately bound role elsewhere.
+    // Intersection means the role's own narrower scoping still decides.
+    expect(grantTerraform).toContain('grant   = local.bedrock_role_account');
+    expect(grantTerraform).toContain('ceiling = "*"');
+  });
+
+  it('reaches both brokers, so the preflight exercises the call it predicts', () => {
+    const occurrences = brokerTerraform.match(
+      /BEDROCK_SESSION_POLICY\s+=\s+var\.bedrock_role_session_policy_json/g,
+    );
+    // Once for the value broker, once for the metadata broker running the preflight.
+    expect(occurrences).toHaveLength(2);
+    expect(brokerVariables).toContain('variable "bedrock_role_session_policy_json"');
   });
 });

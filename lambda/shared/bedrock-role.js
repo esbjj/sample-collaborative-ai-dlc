@@ -82,11 +82,54 @@ export const composeRoleSessionName = (projectId) => {
   return sessionName;
 };
 
+// ── The permission ceiling attached to every minted credential ──
+//
+// req-least-privilege-assume. The customer-facing grant rendered by
+// terraform/bedrock-role-grant.tf is ADVICE: the role lives in an account this
+// deployment does not manage, so nothing verifies the operator attached it, or that
+// they attached nothing wider. A role named `aidlc-bedrock-*` that trusts the broker
+// is bindable by any space owner, and whatever it grants is delivered verbatim into a
+// container that executes model-authored code.
+//
+// A session policy closes that: effective permissions become the INTERSECTION of the
+// role's own policy and this ceiling, so an over-permissive role cannot exceed Bedrock
+// invoke. Measured 2026-09-07 against a throwaway role holding the reference grant
+// plus s3:ListAllMyBuckets — without the ceiling the S3 call succeeded, with it the S3
+// call was denied while `eu.anthropic.claude-sonnet-5` still invoked, and a bare
+// foundation-model id stayed denied (con-fm-fence-works holds through the ceiling).
+//
+// The value is rendered from the same Terraform definition as the grant and passed in
+// BEDROCK_SESSION_POLICY, never composed here. Hard-coding it would reintroduce the
+// drift this exists to prevent: when Codex moved to the Bedrock Runtime provider the
+// grant gained a fourth statement (`project/default`), and a copy would have 401'd
+// every Codex call.
+//
+// An ABSENT value applies no ceiling rather than refusing to mint. That matches
+// roleArnMatchesAllowlist's treatment of an empty allowlist — a missing configuration
+// means "unknown", not "deny everything" — and the alternative would fail every stage
+// during a partial deploy for the sake of a defence-in-depth control whose primary is
+// the role's own policy.
+export const readSessionPolicy = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    // Parsed rather than passed through, so a malformed value is inert instead of
+    // failing every AssumeRole with a ValidationError.
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (!Array.isArray(parsed.Statement) || parsed.Statement.length === 0) return null;
+    return JSON.stringify(parsed);
+  } catch {
+    return null;
+  }
+};
+
 export const assumeBedrockRole = async (
-  { roleArn, externalId, projectId, sessionName = null },
+  { roleArn, externalId, projectId, sessionName = null, sessionPolicy = null },
   stsClient,
 ) => {
   const RoleSessionName = sessionName || composeRoleSessionName(projectId);
+  const Policy = readSessionPolicy(sessionPolicy);
   let result;
   try {
     result = await stsClient.send(
@@ -98,6 +141,7 @@ export const assumeBedrockRole = async (
         // customer's trust policy, so passing any would fail closed on every
         // role that omits it. Attribution is RoleSessionName only.
         ...(externalId ? { ExternalId: externalId } : {}),
+        ...(Policy ? { Policy } : {}),
       }),
     );
   } catch (error) {
@@ -218,6 +262,7 @@ export const preflightBedrockRoleBinding = async (
     assumableRoleArns = [],
     brokerRoleArn = null,
     platformAccountId = null,
+    sessionPolicy = null,
   },
   stsClient,
 ) => {
@@ -240,7 +285,7 @@ export const preflightBedrockRoleBinding = async (
     };
   }
   try {
-    await assumeBedrockRole({ roleArn, externalId, sessionName }, stsClient);
+    await assumeBedrockRole({ roleArn, externalId, sessionName, sessionPolicy }, stsClient);
     return { ok: true, cause: BEDROCK_PREFLIGHT_CAUSES.OK, sessionName };
   } catch (error) {
     if (error?.code === BEDROCK_ROLE_ERROR_CODES.ASSUME_THROTTLED) {
@@ -278,5 +323,6 @@ export default {
   composeRoleSessionName,
   parseAssumableRoleArns,
   preflightBedrockRoleBinding,
+  readSessionPolicy,
   roleArnMatchesAllowlist,
 };

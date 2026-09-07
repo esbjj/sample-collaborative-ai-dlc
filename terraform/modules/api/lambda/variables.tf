@@ -280,6 +280,12 @@ variable "bedrock_assumable_role_arns" {
   }
 }
 
+variable "bedrock_role_session_policy_json" {
+  description = "Session policy the broker attaches to every Bedrock AssumeRole, rendered from the same definition as the customer grant. Empty disables the ceiling."
+  type        = string
+  default     = ""
+}
+
 variable "agent_credential_grant_secret_param_name" {
   description = "SSM parameter name of the HMAC secret used to authorize AgentCore credential-broker requests"
   type        = string

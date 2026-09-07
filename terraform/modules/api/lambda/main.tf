@@ -1072,6 +1072,13 @@ module "credential_broker_lambda" {
     BITBUCKET_OAUTH_SECRET_NAME         = var.bitbucket_oauth_secret_name
     AGENT_SETTINGS_SSM_PREFIX           = "/${var.project_name}/${var.environment}"
     AGENT_CREDENTIAL_GRANT_SECRET_PARAM = var.agent_credential_grant_secret_param_name
+    # req-least-privilege-assume. The ceiling the broker attaches to every
+    # AssumeRole, rendered from the SAME definition as the customer-facing grant
+    # (see terraform/bedrock-role-grant.tf). The grant is advice about a role in an
+    # account this deployment does not manage; this is the enforcement, so a role
+    # carrying more than Bedrock invoke cannot deliver more than Bedrock invoke into
+    # a stage container.
+    BEDROCK_SESSION_POLICY = var.bedrock_role_session_policy_json
   }
 }
 
@@ -1114,6 +1121,11 @@ module "credential_metadata_lambda" {
     BEDROCK_ASSUMABLE_ROLE_ARNS = jsonencode(var.bedrock_assumable_role_arns)
     CREDENTIAL_BROKER_ROLE_ARN  = aws_iam_role.credential_broker.arn
     PLATFORM_ACCOUNT_ID         = data.aws_caller_identity.current.account_id
+    # The preflight must exercise the SAME AssumeRole the resolution path will, or it
+    # stops predicting it — so it attaches the same ceiling. A session policy does not
+    # affect whether AssumeRole is authorized (that is the trust policy's job), so this
+    # cannot change a preflight verdict; it keeps the two paths identical.
+    BEDROCK_SESSION_POLICY = var.bedrock_role_session_policy_json
   }
 }
 

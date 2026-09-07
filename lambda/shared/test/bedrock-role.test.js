@@ -5,8 +5,10 @@ import {
   BEDROCK_PREFLIGHT_CAUSES,
   PREFLIGHT_SESSION_NAME,
   ROLE_SESSION_DURATION_SECONDS,
+  assumeBedrockRole,
   parseAssumableRoleArns,
   preflightBedrockRoleBinding,
+  readSessionPolicy,
   roleArnMatchesAllowlist,
 } from '../bedrock-role.js';
 
@@ -200,5 +202,75 @@ describe('assumable-role allowlist matching', () => {
     expect(parseAssumableRoleArns(ALLOWLIST)).toEqual(ALLOWLIST);
     expect(parseAssumableRoleArns('')).toEqual([]);
     expect(parseAssumableRoleArns('[not json')).toEqual([]);
+  });
+});
+
+// specs/bedrock-iam-role-credential-mode — req-least-privilege-assume.
+//
+// The ceiling attached to every minted credential. Verified live on 2026-09-07 against
+// a throwaway role holding the reference grant plus s3:ListAllMyBuckets: without a
+// session policy the S3 call SUCCEEDED, with one it was denied while
+// eu.anthropic.claude-sonnet-5 still invoked. These tests pin the plumbing that live
+// result depends on.
+describe('Bedrock session-policy ceiling', () => {
+  const CEILING = JSON.stringify({
+    Version: '2012-10-17',
+    Statement: [{ Effect: 'Allow', Action: ['bedrock:InvokeModel'], Resource: '*' }],
+  });
+  const credentials = {
+    AccessKeyId: 'AKIA',
+    SecretAccessKey: 'secret',
+    SessionToken: 'token',
+    Expiration: new Date('2026-01-01T01:00:00Z'),
+  };
+
+  beforeEach(() => {
+    sts.reset();
+    sts.on(AssumeRoleCommand).resolves({ Credentials: credentials });
+  });
+
+  const policySent = () => sts.commandCalls(AssumeRoleCommand)[0].args[0].input.Policy;
+
+  it('attaches the ceiling to the AssumeRole that mints stage credentials', async () => {
+    await assumeBedrockRole(
+      { roleArn: ROLE_ARN, projectId: 'p-1', sessionPolicy: CEILING },
+      new STSClient({}),
+    );
+    expect(JSON.parse(policySent())).toEqual(JSON.parse(CEILING));
+  });
+
+  it('attaches it on the preflight too, so the preflight predicts the real call', async () => {
+    await preflightBedrockRoleBinding(
+      { roleArn: ROLE_ARN, assumableRoleArns: ALLOWLIST, sessionPolicy: CEILING },
+      new STSClient({}),
+    );
+    expect(JSON.parse(policySent())).toEqual(JSON.parse(CEILING));
+  });
+
+  // A missing ceiling applies none rather than refusing to mint. Same reasoning as an
+  // empty assumable-role allowlist: a missing configuration means "unknown", not "deny
+  // everything". Refusing would fail every stage during a partial deploy for the sake of
+  // a defence-in-depth control whose primary is the role's own policy.
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+    ['not JSON', 'not-json'],
+    ['not an object', '"a string"'],
+    ['an array', '[]'],
+    ['missing Statement', '{"Version":"2012-10-17"}'],
+    ['an empty Statement list', '{"Version":"2012-10-17","Statement":[]}'],
+  ])('sends no Policy when the ceiling is %s, rather than failing the mint', async (_l, value) => {
+    await assumeBedrockRole(
+      { roleArn: ROLE_ARN, projectId: 'p-1', sessionPolicy: value },
+      new STSClient({}),
+    );
+    expect(policySent()).toBeUndefined();
+    expect(sts.commandCalls(AssumeRoleCommand)).toHaveLength(1);
+  });
+
+  it('normalises the ceiling rather than forwarding raw text', () => {
+    // Parsed and re-serialised, so trailing whitespace or formatting from an env var
+    // cannot reach STS as a ValidationError.
+    expect(readSessionPolicy(`  ${CEILING}\n`)).toBe(CEILING);
   });
 });
