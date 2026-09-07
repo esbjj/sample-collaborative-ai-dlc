@@ -486,6 +486,84 @@ describe('bedrock role credential resolution', () => {
     expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
     expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(0);
   });
+
+  // specs/bedrock-iam-role-credential-mode — req-resolution-resilience.
+  //
+  // The broker reads SSM on EVERY resolution, concurrently across stages, so SSM's
+  // own request rate is on the critical path. A throttled read has to be legible as
+  // throttling rather than as a generic broker failure, because the operator
+  // response differs: throttling clears on the stage retry, an unavailable store
+  // does not.
+  it.each([
+    ['ThrottlingException', 'AGENT_CREDENTIAL_STORE_THROTTLED'],
+    ['TooManyRequestsException', 'AGENT_CREDENTIAL_STORE_THROTTLED'],
+    ['RequestLimitExceeded', 'AGENT_CREDENTIAL_STORE_THROTTLED'],
+    ['AccessDeniedException', 'AGENT_CREDENTIAL_STORE_UNAVAILABLE'],
+    ['KMSKeyDisabled', 'AGENT_CREDENTIAL_STORE_UNAVAILABLE'],
+    ['InternalServerError', 'AGENT_CREDENTIAL_STORE_UNAVAILABLE'],
+  ])('maps an SSM %s onto %s and leaks no parameter path', async (ssmErrorName, expectedCode) => {
+    const ssmError = Object.assign(
+      // A real SSM message echoes the parameter name, which identifies the tenant.
+      new Error(`Parameter ${PLATFORM_PATH} could not be read`),
+      { name: ssmErrorName },
+    );
+    ssmMock.on(GetParameterCommand).rejects(ssmError);
+
+    let thrown;
+    try {
+      await resolve(grantFor('execution', { executionId: 'e-1' }));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(loggableAgentCredentialErrorCode(thrown)).toBe(expectedCode);
+    expect(thrown.message).not.toContain(PLATFORM_PATH);
+    // A store failure must never be mistaken for a usable credential, so no
+    // AssumeRole is attempted.
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it('treats a cleared binding as missing rather than as a store failure', async () => {
+    // A deleted parameter is a REVOKED binding. It must fail closed as "no
+    // credential" — reporting a store outage would send an operator chasing SSM.
+    ssmMock
+      .on(GetParameterCommand)
+      .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }));
+
+    const result = await resolve(grantFor('execution', { executionId: 'e-1' }));
+
+    expect(result.credentials).toEqual([
+      { binding: { provider: 'bedrock', source: 'platform' }, kind: null, value: null },
+    ]);
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it('surfaces a role deleted or re-trusted mid-stage as a typed failure on the next resolution', async () => {
+    // Nothing is cached: the ARN is read and the role assumed on every invocation,
+    // so a role deleted or a trust policy narrowed between two stages of the same
+    // intent is caught at the next one rather than producing a stale credential.
+    storeValue(JSON.stringify({ roleArn: ROLE_ARN }));
+    stsMock.on(AssumeRoleCommand).resolvesOnce({ Credentials: STS_CREDENTIALS });
+
+    const first = await resolve(grantFor('execution', { executionId: 'e-1' }));
+    expect(first.credentials[0].kind).toBe('role');
+
+    // The operator deletes the role, or removes the broker from its trust policy.
+    stsMock
+      .on(AssumeRoleCommand)
+      .rejects(Object.assign(new Error('denied'), { name: 'AccessDenied' }));
+
+    let thrown;
+    try {
+      await resolve(grantFor('execution', { executionId: 'e-2' }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(loggableAgentCredentialErrorCode(thrown)).toBe('BEDROCK_ROLE_ASSUME_DENIED');
+    // Two resolutions, two AssumeRole calls: per-invocation minting is what makes a
+    // revocation visible at all.
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(2);
+  });
 });
 
 describe('concurrent GitLab credential requests (refresh race)', () => {

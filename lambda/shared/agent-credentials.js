@@ -649,6 +649,45 @@ export const resolveEffectiveCredentialBindings = async (ssm, { base, projectId,
   return bindings;
 };
 
+// ── Credential-store failures ──
+//
+// specs/bedrock-iam-role-credential-mode: req-resolution-resilience. The broker
+// now reads SSM on EVERY resolution, concurrently across stages, so SSM's own
+// request rate is on the critical path. A throttled read must be legible as
+// exactly that rather than collapsing into a generic broker failure, because the
+// operator response differs: throttling is transient and the stage retry will
+// clear it, while an unavailable store is a configuration or permission fault.
+export const AGENT_CREDENTIAL_STORE_ERROR_CODES = Object.freeze({
+  THROTTLED: 'AGENT_CREDENTIAL_STORE_THROTTLED',
+  UNAVAILABLE: 'AGENT_CREDENTIAL_STORE_UNAVAILABLE',
+});
+
+const THROTTLED_SSM_ERRORS = new Set([
+  'ThrottlingException',
+  'Throttling',
+  'TooManyRequestsException',
+  'RequestLimitExceeded',
+  'TooManyUpdates',
+  'SlowDown',
+]);
+
+// Map an SSM failure onto one allowlisted code, discarding the original message —
+// an SSM error can echo the parameter name, which identifies the tenant.
+export const classifyCredentialStoreFailure = (error) => {
+  const name = error?.name || error?.Code || '';
+  const code = THROTTLED_SSM_ERRORS.has(name)
+    ? AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
+    : AGENT_CREDENTIAL_STORE_ERROR_CODES.UNAVAILABLE;
+  return Object.assign(
+    new Error(
+      code === AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED
+        ? 'Credential store read was throttled'
+        : 'Credential store read failed',
+    ),
+    { code },
+  );
+};
+
 export const readCredentialBindingValue = async (ssm, { base, binding, projectId = null }) => {
   const normalized = normalizeCredentialBinding(binding);
   if (!normalized) return '';
@@ -669,8 +708,10 @@ export const readCredentialBindingValue = async (ssm, { base, binding, projectId
     const value = result.Parameter?.Value || '';
     return isConfiguredCredentialValue(value) ? value : '';
   } catch (error) {
+    // An absent parameter is a MISSING binding, not a failure: a cleared scope
+    // must fail closed as "no credential", never as a store outage.
     if (error?.name === 'ParameterNotFound') return '';
-    throw error;
+    throw classifyCredentialStoreFailure(error);
   }
 };
 

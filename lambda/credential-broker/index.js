@@ -15,6 +15,7 @@ import {
 import { resolveBindingCredential } from '../shared/source-control-credentials.js';
 import { repoUrl, repoProvider } from '../shared/repo-provider.js';
 import {
+  AGENT_CREDENTIAL_STORE_ERROR_CODES,
   CREDENTIAL_VALUE_KINDS,
   looksLikeRoleBindingValue,
   parseRoleBindingValue,
@@ -58,6 +59,14 @@ const loggableAgentCredentialErrorCode = (error) => {
       return 'AGENT_CREDENTIAL_GRANT_INVALID';
     case 'AGENT_CREDENTIAL_GRANT_NOT_CONFIGURED':
       return 'AGENT_CREDENTIAL_GRANT_NOT_CONFIGURED';
+    // req-resolution-resilience: SSM is on the critical path of every resolution,
+    // so a throttled or unavailable store is reported as itself rather than as a
+    // generic broker failure. Both still reach the stage as
+    // credential_resolution_failed; the code is what tells an operator whether to
+    // wait for the retry or fix a permission.
+    case AGENT_CREDENTIAL_STORE_ERROR_CODES.THROTTLED:
+    case AGENT_CREDENTIAL_STORE_ERROR_CODES.UNAVAILABLE:
+      return error.code;
     case BEDROCK_ROLE_ERROR_CODES.BINDING_INVALID:
     case BEDROCK_ROLE_ERROR_CODES.ASSUME_DENIED:
     case BEDROCK_ROLE_ERROR_CODES.ASSUME_THROTTLED:
