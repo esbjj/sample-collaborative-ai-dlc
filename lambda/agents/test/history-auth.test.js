@@ -227,6 +227,11 @@ describe('project agent capabilities', () => {
     expect(JSON.parse(response.body)).toMatchObject({
       available: ['kiro', 'claude', 'opencode', 'codex'],
       credentialSources: { bedrock: 'space', kiro: 'space' },
+      // This broker mock returns `bindings` with NO `credentialKinds`, which is
+      // exactly an older credential-metadata Lambda during a mixed-version deploy.
+      // The kind is descriptive, so it must degrade to null and leave capabilities
+      // working — never throw and 500 a route over a badge label.
+      credentialKinds: { bedrock: null, kiro: null },
     });
     const payload = JSON.parse(
       Buffer.from(
@@ -242,6 +247,69 @@ describe('project agent capabilities', () => {
       },
     });
     expect(typeof payload.agentCredentialGrant).toBe('string');
+  });
+
+  // A binding is a POINTER and is forwarded VERBATIM to the runtime here, signed
+  // into a credential grant, and persisted as an execution's durable snapshot. The
+  // credential KIND belongs to none of those: it describes the stored value and is
+  // re-read every invocation. So it travels in a sibling map, and these assertions
+  // are what stop it from being reintroduced onto the binding itself.
+  it('reports the credential kind per CLI without putting it on the binding', async () => {
+    const caller = `u-${randomUUID()}`;
+    const { projectId } = await seedProject(caller);
+    credentialMetadataHandler = () => ({
+      ok: true,
+      bindings: {
+        bedrock: { provider: 'bedrock', source: 'platform' },
+        kiro: { provider: 'kiro', source: 'platform' },
+      },
+      credentialKinds: { bedrock: 'role', kiro: 'bearer' },
+    });
+    agentcoreMock.on(InvokeAgentRuntimeCommand).resolves({
+      response: {
+        transformToString: async () =>
+          JSON.stringify({
+            ok: true,
+            clis: [
+              { cli: 'kiro', installed: true, authed: true, available: true },
+              { cli: 'claude', installed: true, authed: true, available: true },
+              { cli: 'opencode', installed: true, authed: true, available: true },
+              { cli: 'codex', installed: true, authed: true, available: true },
+            ],
+            kiroModels: { models: [], default: null },
+          }),
+      },
+    });
+
+    const response = await handler(
+      event({
+        path: `/projects/${projectId}/agent-capabilities`,
+        projectId,
+        sub: caller,
+      }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.credentialKinds).toEqual({ bedrock: 'role', kiro: 'bearer' });
+    // Per-CLI, derived from the provider map: the three Bedrock CLIs report the
+    // role, Kiro reports its key. This is what makes the compose badge read
+    // "Platform IAM role" on Claude Code and "Platform key" on Kiro.
+    expect(
+      Object.fromEntries(body.runtimeClis.map((cli) => [cli.cli, cli.credentialKind])),
+    ).toEqual({ kiro: 'bearer', claude: 'role', opencode: 'role', codex: 'role' });
+
+    const payload = JSON.parse(
+      Buffer.from(
+        agentcoreMock.commandCalls(InvokeAgentRuntimeCommand)[0].args[0].input.payload,
+      ).toString(),
+    );
+    // The runtime receives the RAW binding map, so a kind added to the binding
+    // object would silently appear here. It must not.
+    expect(payload.credentialBindings).toEqual({
+      bedrock: { provider: 'bedrock', source: 'platform' },
+      kiro: { provider: 'kiro', source: 'platform' },
+    });
   });
 });
 

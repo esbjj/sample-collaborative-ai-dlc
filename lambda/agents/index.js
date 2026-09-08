@@ -54,6 +54,7 @@ import {
   preflightBedrockRoleBindingViaBroker,
   readCredentialScopeStatusViaBroker,
   resolveEffectiveCredentialBindingsViaBroker,
+  resolveEffectiveCredentialMetadataViaBroker,
 } from '../shared/agent-credential-metadata.js';
 import { issueAgentCredentialGrant } from '../shared/agent-credential-grants.js';
 import {
@@ -582,11 +583,13 @@ export const handler = async (event) => {
       const access = await projectRuntimeAccess(event, projectId);
       if (access.denied) return response(access.statusCode, { error: access.error });
       let credentialBindings;
+      let credentialKinds;
       try {
-        credentialBindings = await resolveEffectiveCredentialBindingsViaBroker({
-          projectId,
-          userId: credentialUserId,
-        });
+        ({ bindings: credentialBindings, credentialKinds } =
+          await resolveEffectiveCredentialMetadataViaBroker({
+            projectId,
+            userId: credentialUserId,
+          }));
       } catch (error) {
         console.error('[effective agent credentials] resolve failed:', error.message);
         return response(500, { error: 'Failed to resolve agent credentials' });
@@ -607,9 +610,14 @@ export const handler = async (event) => {
         fetchRuntimeCapabilities(access.runtimeTarget, credentialBindings, projectId),
       ]);
       const credentialSources = credentialSourcesFromBindings(credentialBindings);
+      // Both shapes are populated deliberately. The per-CLI field is what a card
+      // reads first; the top-level map is the fallback when the runtime probe
+      // returned no CLI list. Each is DERIVED from the same provider map, so they
+      // cannot disagree.
       const runtimeClis = (runtimeCaps?.clis ?? []).map((cli) => ({
         ...cli,
         credentialSource: credentialSources[credentialProviderForCli(cli.cli)] ?? null,
+        credentialKind: credentialKinds[credentialProviderForCli(cli.cli)] ?? null,
       }));
       const available = runtimeClis.filter((cli) => cli.available).map((cli) => cli.cli);
       if (!withModels) {
@@ -618,6 +626,7 @@ export const handler = async (event) => {
           runtimeModelOverride: RUNTIME_MODEL_OVERRIDE,
           runtimeClis,
           credentialSources,
+          credentialKinds,
         });
       }
       const opencodeModels = claudeModels.map((model) => ({
@@ -629,6 +638,7 @@ export const handler = async (event) => {
         runtimeModelOverride: RUNTIME_MODEL_OVERRIDE,
         runtimeClis,
         credentialSources,
+        credentialKinds,
         models: {
           claude: claudeModels,
           opencode: opencodeModels,
