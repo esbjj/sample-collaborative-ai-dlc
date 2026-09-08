@@ -9,7 +9,7 @@ import { DiscussButton } from '@/components/discussion/DiscussButton';
 import { humanizeStageId } from '@/components/intent/documentHelpers';
 import { deriveLaneWaits } from '@/lib/intentRecovery';
 import { formatTrackerSourceLabel } from '@/lib/trackerSourceLabel';
-import { AGENT_CLI_METADATA, AGENT_CREDENTIAL_SOURCE_LABELS } from '@/lib/agentCli';
+import { AGENT_CLI_METADATA, credentialBadgeLabel } from '@/lib/agentCli';
 import { PendingQuestionsTabs } from '@/components/intent/PendingQuestionsTabs';
 import { ScopeBadge } from '@/components/intent/ScopeBadge';
 import { QuorumEditPanel } from '@/components/intent/QuorumEditPanel';
@@ -258,9 +258,7 @@ export default function IntentView() {
             <Badge variant="outline" className="gap-1 text-[10px] shrink-0">
               <Bot className="h-3 w-3" />
               {AGENT_CLI_METADATA[intent.agentCli].label}
-              {intent.credentialSource
-                ? ` · ${AGENT_CREDENTIAL_SOURCE_LABELS[intent.credentialSource]} key`
-                : ''}
+              {intent.credentialSource ? ` · ${credentialBadgeLabel(intent.credentialSource)}` : ''}
             </Badge>
           )}
           {TERMINAL_STATUSES.has(intent.status) && (
