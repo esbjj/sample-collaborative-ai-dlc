@@ -64,6 +64,10 @@ export interface RuntimeCliStatus {
   authed: boolean;
   available: boolean;
   credentialSource?: AgentCredentialSource | null;
+  /** What KIND of credential the effective binding holds: an assumed IAM role or
+   *  a stored key. Absent/null when the platform could not determine it, in which
+   *  case the badge names the scope only rather than guessing a noun. */
+  credentialKind?: BedrockCredentialMode;
 }
 
 export type AgentCredentialSource = 'user' | 'space' | 'platform';
@@ -113,6 +117,10 @@ export interface AgentCapabilities {
   /** Present only with `?models=1`: per-CLI availability from the v2 runtime. */
   runtimeClis?: RuntimeCliStatus[] | null;
   credentialSources?: Partial<Record<'bedrock' | 'kiro', AgentCredentialSource | null>>;
+  /** Per-provider credential kind, the fallback for `runtimeClis[].credentialKind`
+   *  when the runtime probe returned no CLI list. Derived from the same resolve, so
+   *  the two can never disagree. */
+  credentialKinds?: Partial<Record<'bedrock' | 'kiro', BedrockCredentialMode>>;
   /** Present only with `?models=1`: selectable models per CLI. Claude/OpenCode
    *  are region-valid Bedrock inference profiles; Kiro uses its own namespace. */
   models?: Partial<Record<AgentCli, AgentModel[]>>;
