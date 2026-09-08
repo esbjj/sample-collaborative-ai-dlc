@@ -3,6 +3,7 @@ import { parseLambdaPayload } from './lambda-payload.js';
 import {
   AGENT_CREDENTIAL_METADATA_ACTIONS,
   AGENT_CREDENTIAL_PROVIDERS,
+  CREDENTIAL_VALUE_KINDS,
   normalizeCredentialBinding,
 } from './agent-credentials.js';
 
@@ -94,7 +95,7 @@ export const readCredentialScopeStatusViaBroker = async (request, deps) => {
   return status;
 };
 
-export const resolveEffectiveCredentialBindingsViaBroker = async (request, deps) => {
+export const resolveEffectiveCredentialMetadataViaBroker = async (request, deps) => {
   const result = await invokeMetadataBroker(
     {
       action: AGENT_CREDENTIAL_METADATA_ACTIONS.RESOLVE_EFFECTIVE_BINDINGS,
@@ -105,17 +106,44 @@ export const resolveEffectiveCredentialBindingsViaBroker = async (request, deps)
   if (!result.bindings || typeof result.bindings !== 'object' || Array.isArray(result.bindings)) {
     throw invalidMetadata('Agent credential metadata broker returned invalid bindings');
   }
+  // The kind is DESCRIPTIVE, not a security control: it decides whether a badge
+  // says "IAM role" or "key". So an absent or unrecognised kind degrades to null
+  // rather than throwing — an older broker that returns only `bindings`, or a
+  // newer one returning a kind this reader does not know, must leave capabilities
+  // working and merely unlabelled. Throwing here would turn a cosmetic field into
+  // an outage during a mixed-version deploy window.
+  const kinds =
+    result.credentialKinds &&
+    typeof result.credentialKinds === 'object' &&
+    !Array.isArray(result.credentialKinds)
+      ? result.credentialKinds
+      : {};
+  const credentialKinds = Object.fromEntries(
+    AGENT_CREDENTIAL_PROVIDERS.map((provider) => {
+      const kind = kinds[provider];
+      return [
+        provider,
+        kind === CREDENTIAL_VALUE_KINDS.BEARER || kind === CREDENTIAL_VALUE_KINDS.ROLE
+          ? kind
+          : null,
+      ];
+    }),
+  );
   try {
-    return Object.fromEntries(
+    const bindings = Object.fromEntries(
       AGENT_CREDENTIAL_PROVIDERS.map((provider) => [
         provider,
         result.bindings[provider] ? normalizeCredentialBinding(result.bindings[provider]) : null,
       ]),
     );
+    return { bindings, credentialKinds };
   } catch {
     throw invalidMetadata('Agent credential metadata broker returned invalid bindings');
   }
 };
+
+export const resolveEffectiveCredentialBindingsViaBroker = async (request, deps) =>
+  (await resolveEffectiveCredentialMetadataViaBroker(request, deps)).bindings;
 
 export { invokeMetadataBroker };
 
@@ -157,4 +185,5 @@ export default {
   preflightBedrockRoleBindingViaBroker,
   readCredentialScopeStatusViaBroker,
   resolveEffectiveCredentialBindingsViaBroker,
+  resolveEffectiveCredentialMetadataViaBroker,
 };

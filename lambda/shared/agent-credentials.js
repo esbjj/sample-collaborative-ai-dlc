@@ -733,13 +733,28 @@ export const deleteCredentialScope = async (
   return { deleted, missing, externalIdDeleted };
 };
 
-export const resolveEffectiveCredentialBindings = async (ssm, { base, projectId, userId }) => {
+// Resolve the effective binding per provider AND the kind of value each one
+// holds, in a single pass over the scope precedence.
+//
+// The kind rides in a SIBLING map rather than on the binding object, and that
+// placement is load-bearing. A binding is a POINTER (provider + source), and
+// three separate paths consume it verbatim: it is the payload of a signed
+// credential grant, it is forwarded raw to the AgentCore runtime by
+// fetchRuntimeCapabilities, and it is persisted as an execution's durable
+// credentialBinding snapshot. The kind belongs to none of those — it is a
+// property of the stored VALUE, re-read on every invocation, so recording it
+// alongside a pointer would let a snapshot outlive the fact it asserts.
+//
+// Free of extra reads: the raw value is already in hand here, which is the only
+// place where classification costs nothing.
+export const resolveEffectiveCredentialState = async (ssm, { base, projectId, userId }) => {
   const sources = {
     user: scopePaths({ base, source: 'user', userId }),
     space: scopePaths({ base, source: 'space', projectId }),
     platform: scopePaths({ base, source: 'platform' }),
   };
   const bindings = {};
+  const credentialKinds = {};
   const unresolved = new Set(AGENT_CREDENTIAL_PROVIDERS);
   for (const source of AGENT_CREDENTIAL_SOURCES) {
     const paths = Object.fromEntries(
@@ -754,13 +769,23 @@ export const resolveEffectiveCredentialBindings = async (ssm, { base, projectId,
         source,
         ...(source === 'user' ? { userId: assertIdentifier(userId, 'userId') } : {}),
       };
+      // Non-throwing on purpose: a malformed role-shaped value must not fail a
+      // resolve that already decided the binding EXISTS. It reports 'role', which
+      // is the fail-safe direction — never mistaken for a usable bearer token.
+      credentialKinds[provider] = credentialValueKindSafe(values[path]);
       unresolved.delete(provider);
     }
     if (unresolved.size === 0) break;
   }
-  for (const provider of unresolved) bindings[provider] = null;
-  return bindings;
+  for (const provider of unresolved) {
+    bindings[provider] = null;
+    credentialKinds[provider] = null;
+  }
+  return { bindings, credentialKinds };
 };
+
+export const resolveEffectiveCredentialBindings = async (ssm, options) =>
+  (await resolveEffectiveCredentialState(ssm, options)).bindings;
 
 export const readCredentialBindingValue = async (ssm, { base, binding, projectId = null }) => {
   const normalized = normalizeCredentialBinding(binding);
@@ -815,6 +840,7 @@ export default {
   readCredentialBindingValue,
   readCredentialScopeStatus,
   resolveEffectiveCredentialBindings,
+  resolveEffectiveCredentialState,
   validateCredentialScopeUpdate,
   writeCredentialScope,
 };

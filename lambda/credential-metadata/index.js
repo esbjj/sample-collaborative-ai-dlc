@@ -10,7 +10,7 @@ import { STSClient } from '@aws-sdk/client-sts';
 import {
   AGENT_CREDENTIAL_METADATA_ACTIONS,
   readCredentialScopeStatus,
-  resolveEffectiveCredentialBindings,
+  resolveEffectiveCredentialState,
 } from '../shared/agent-credentials.js';
 import { parseAssumableRoleArns, preflightBedrockRoleBinding } from '../shared/bedrock-role.js';
 
@@ -33,13 +33,16 @@ export const inspectAgentCredentialMetadata = async (
         }),
       };
     case AGENT_CREDENTIAL_METADATA_ACTIONS.RESOLVE_EFFECTIVE_BINDINGS:
-      return {
-        bindings: await resolveEffectiveCredentialBindings(ssmClient, {
-          base,
-          projectId: event.projectId,
-          userId: event.userId,
-        }),
-      };
+      // Returns the effective binding per provider PLUS the kind of value each
+      // holds ('role' | 'bearer'). The kind is not a secret — the settings read
+      // path already reports bedrockMode to any authenticated caller — and it is
+      // what lets a UI name a credential correctly instead of calling an IAM role
+      // a "key". Still metadata only: no value, no role ARN, no external ID.
+      return await resolveEffectiveCredentialState(ssmClient, {
+        base,
+        projectId: event.projectId,
+        userId: event.userId,
+      });
     // specs/bedrock-iam-role-credential-mode: req-binding-preflight.
     //
     // A bare AssumeRole with NO model invocation, so a wrong trust policy becomes

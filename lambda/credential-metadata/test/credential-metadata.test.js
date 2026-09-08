@@ -78,8 +78,43 @@ describe('agent credential metadata broker', () => {
         bedrock: { provider: 'bedrock', source: 'space' },
         kiro: { provider: 'kiro', source: 'user', userId: 'u-1' },
       },
+      // The kind of value each effective binding holds, so a UI can name an IAM
+      // role as a role instead of a "key". Descriptive metadata: no value, no role
+      // ARN, no external ID — the assertion below still proves no secret escapes.
+      credentialKinds: { bedrock: 'bearer', kiro: 'bearer' },
     });
     expect(JSON.stringify(result)).not.toContain('secret:');
+  });
+
+  it('reports a role-shaped bedrock binding as kind role, and an unset provider as null', async () => {
+    const ROLE_VALUE = JSON.stringify({
+      roleArn: 'arn:aws:iam::111122223333:role/aidlc-bedrock-inference',
+    });
+    ssmMock.on(GetParametersCommand).callsFake((input) => ({
+      Parameters: (input.Names ?? [])
+        .filter((name) => name === '/app/dev/bedrock-bearer-token')
+        .map((Name) => ({ Name, Value: ROLE_VALUE })),
+    }));
+
+    const result = await inspectAgentCredentialMetadata(
+      {
+        action: AGENT_CREDENTIAL_METADATA_ACTIONS.RESOLVE_EFFECTIVE_BINDINGS,
+        projectId: 'p-1',
+        userId: 'u-1',
+      },
+      { ssmClient: ssm, env: { AGENT_SETTINGS_SSM_PREFIX: '/app/dev' } },
+    );
+
+    expect(result).toEqual({
+      bindings: {
+        bedrock: { provider: 'bedrock', source: 'platform' },
+        kiro: null,
+      },
+      credentialKinds: { bedrock: 'role', kiro: null },
+    });
+    // The role ARN is tenant-identifying and no lower-privilege surface needs it,
+    // so the kind must be the ONLY thing the mode disclosure adds here.
+    expect(JSON.stringify(result)).not.toContain('aidlc-bedrock-inference');
   });
 
   it('rejects every action outside the metadata-only allowlist', async () => {
